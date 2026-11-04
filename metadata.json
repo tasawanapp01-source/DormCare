@@ -1,0 +1,6 @@
+{
+  "name": "DormCare - ระบบแจ้งซ่อมหอพักและคลังวัสดุ",
+  "description": "ระบบจัดการแจ้งซ่อม อะไหล่ และคลังวัสดุสำหรับหอพักหลายแห่ง ครอบคลุมผู้ดูแลระบบ ช่าง และผู้พักอาศัย ภายใต้เงื่อนไขฟรี 100%",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
