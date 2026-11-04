@@ -1,0 +1,169 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile with role-based access for dorm maintenance system",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "username": { "type": "string" },
+        "password": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "staff", "resident"] },
+        "propertyIds": { "type": "array" },
+        "phone": { "type": "string" },
+        "building": { "type": "string" },
+        "floor": { "type": "string" },
+        "roomId": { "type": "string" },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["uid", "username", "role", "displayName"]
+    },
+    "Property": {
+      "title": "Property",
+      "description": "Dormitory property or branch details",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "code": { "type": "string" },
+        "name": { "type": "string" },
+        "residentSelfWithdrawEnabled": { "type": "boolean" },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "code", "name"]
+    },
+    "RepairCategory": {
+      "title": "RepairCategory",
+      "description": "Configurable repair category",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "isDefault": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    },
+    "WorkOrder": {
+      "title": "WorkOrder",
+      "description": "Dorm repair request ticket",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "docId": { "type": "string" },
+        "propertyId": { "type": "string" },
+        "building": { "type": "string" },
+        "floor": { "type": "string" },
+        "room": { "type": "string" },
+        "requesterUid": { "type": "string" },
+        "requesterName": { "type": "string" },
+        "requesterPhone": { "type": "string" },
+        "title": { "type": "string" },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "urgency": { "type": "string", "enum": ["low", "medium", "high", "emergency"] },
+        "status": { "type": "string", "enum": ["pending", "accepted", "in_progress", "waiting_parts", "external_contractor", "completed", "cancelled"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "expiresAt": { "type": "string" }
+      },
+      "required": ["id", "propertyId", "room", "title", "category", "status"]
+    },
+    "InventoryItem": {
+      "title": "InventoryItem",
+      "description": "Spare parts and consumables in inventory",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "propertyId": { "type": "string" },
+        "itemCode": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "unit": { "type": "string" },
+        "quantity": { "type": "number" },
+        "minQuantity": { "type": "number" },
+        "unitPrice": { "type": "number" },
+        "location": { "type": "string" },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "propertyId", "itemCode", "name", "quantity"]
+    },
+    "InventoryTransaction": {
+      "title": "InventoryTransaction",
+      "description": "Stock movement audit log",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "propertyId": { "type": "string" },
+        "itemId": { "type": "string" },
+        "itemCode": { "type": "string" },
+        "itemName": { "type": "string" },
+        "type": { "type": "string", "enum": ["receive", "withdraw_work_order", "withdraw_resident", "adjustment"] },
+        "quantity": { "type": "number" },
+        "previousQuantity": { "type": "number" },
+        "newQuantity": { "type": "number" },
+        "unitPrice": { "type": "number" },
+        "totalValue": { "type": "number" },
+        "ticketId": { "type": "string" },
+        "reason": { "type": "string" },
+        "performedByUid": { "type": "string" },
+        "performedByName": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "propertyId", "itemId", "type", "quantity"]
+    },
+    "SystemConfig": {
+      "title": "SystemConfig",
+      "description": "System metadata and configuration",
+      "type": "object",
+      "properties": {
+        "systemName": { "type": "string" },
+        "version": { "type": "string" },
+        "initializedAt": { "type": "string" },
+        "lastSyncedAt": { "type": "string" },
+        "hasMockData": { "type": "boolean" }
+      }
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User accounts and authentication profiles"
+    },
+    "/properties/{propertyId}": {
+      "schema": "Property",
+      "description": "Dormitory property branches"
+    },
+    "/repairCategories/{categoryId}": {
+      "schema": "RepairCategory",
+      "description": "Configurable repair categories"
+    },
+    "/workOrders/{ticketId}": {
+      "schema": "WorkOrder",
+      "description": "Work order tickets"
+    },
+    "/workOrders/{ticketId}/events/{eventId}": {
+      "schema": "WorkOrderEvent",
+      "description": "Work order lifecycle event logs"
+    },
+    "/inventoryItems/{itemId}": {
+      "schema": "InventoryItem",
+      "description": "Inventory stock items"
+    },
+    "/inventoryTransactions/{txId}": {
+      "schema": "InventoryTransaction",
+      "description": "Inventory movement audit transactions"
+    },
+    "/systemConfig/{docId}": {
+      "schema": "SystemConfig",
+      "description": "System settings and metadata"
+    }
+  }
+}

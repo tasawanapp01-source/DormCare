@@ -15,6 +15,7 @@ import {
   Flame,
   Info,
   RefreshCw,
+  Database,
 } from 'lucide-react';
 import {
   getActiveFirebaseConfig,
@@ -22,6 +23,7 @@ import {
   clearStoredFirebaseConfig,
   isFirebaseConfigured,
 } from '../lib/firebase';
+import { uploadSystemDataToDatabase } from '../lib/firestoreService';
 import { FirebaseConfigState } from '../types';
 import { useToast } from './Toast';
 
@@ -48,9 +50,27 @@ export const FirebaseSetupModal: React.FC<FirebaseSetupModalProps> = ({
 
   const [activeTab, setActiveTab] = useState<'status' | 'config' | 'guide'>('status');
   const [isTesting, setIsTesting] = useState(false);
+  const [isUploadingSystem, setIsUploadingSystem] = useState(false);
   const [healthStatus, setHealthStatus] = useState<string | null>(null);
 
   if (!isOpen) return null;
+
+  const handleUploadSystem = async () => {
+    setIsUploadingSystem(true);
+    try {
+      const res = await uploadSystemDataToDatabase();
+      if (res.success) {
+        showToast('success', 'อัพโหลดข้อมูลระบบสำเร็จ', 'บันทึกผู้ดูแลระบบหลัก, หอพักหลัก และหมวดหมู่งานซ่อมลงฐานข้อมูลเรียบร้อย (ไม่มีข้อมูลตัวอย่าง)');
+        setHealthStatus(`✅ อัพโหลดข้อมูลระบบลงฐานข้อมูลสำเร็จ (${new Date().toLocaleTimeString('th-TH')})`);
+      } else {
+        showToast('error', 'อัพโหลดไม่สำเร็จ', res.message);
+      }
+    } catch (e: unknown) {
+      showToast('error', 'เกิดข้อผิดพลาด', e instanceof Error ? e.message : String(e));
+    } finally {
+      setIsUploadingSystem(false);
+    }
+  };
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
@@ -216,6 +236,33 @@ export const FirebaseSetupModal: React.FC<FirebaseSetupModalProps> = ({
                 </ul>
               </div>
 
+              {/* System Baseline Uploader Box */}
+              <div className="p-3.5 rounded-xl bg-indigo-50 border border-indigo-200 flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-indigo-600 text-white flex items-center justify-center shrink-0">
+                    <Database className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-slate-900">
+                      อัพโหลดข้อมูลระบบลงฐานข้อมูล (Zero Mock Data)
+                    </div>
+                    <div className="text-[11px] text-slate-500">
+                      ซิงค์ผู้ดูแลระบบหลัก, หอพักหลัก, และหมวดหมู่งานซ่อมลง Firestore
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleUploadSystem}
+                  disabled={isUploadingSystem}
+                  className="px-3.5 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-xs transition-colors flex items-center gap-1.5 disabled:opacity-60 cursor-pointer"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isUploadingSystem ? 'animate-spin' : ''}`} />
+                  {isUploadingSystem ? 'กำลังอัพโหลด...' : 'อัพโหลดข้อมูลระบบเดี๋ยวนี้'}
+                </button>
+              </div>
+
               {healthStatus && (
                 <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 text-xs text-indigo-900 font-medium">
                   {healthStatus}
@@ -227,7 +274,7 @@ export const FirebaseSetupModal: React.FC<FirebaseSetupModalProps> = ({
                   type="button"
                   onClick={runHealthCheck}
                   disabled={isTesting}
-                  className="px-4 py-2 text-xs font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-xl transition-colors flex items-center gap-1.5"
+                  className="px-4 py-2 text-xs font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isTesting ? 'animate-spin' : ''}`} />
                   ตรวจสอบสถานะระบบ (Health Check)
@@ -236,7 +283,7 @@ export const FirebaseSetupModal: React.FC<FirebaseSetupModalProps> = ({
                   <button
                     type="button"
                     onClick={handleClear}
-                    className="px-4 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50 rounded-xl transition-colors"
+                    className="px-4 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50 rounded-xl transition-colors cursor-pointer"
                   >
                     ล้างการเชื่อมต่อและกลับสู่โหมดจำลอง
                   </button>

@@ -18,6 +18,8 @@ import {
   saveUserProfile,
   DEFAULT_PRIMARY_ADMIN,
   withTimeout,
+  uploadSystemDataToDatabase,
+  UploadSystemDataResult,
 } from './firestoreService';
 
 interface AuthContextType {
@@ -31,6 +33,7 @@ interface AuthContextType {
   logout: () => Promise<void>;
   switchProperty: (propertyId: string) => void;
   refreshUserData: () => Promise<void>;
+  syncSystemData: () => Promise<UploadSystemDataResult>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -56,6 +59,13 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
     async function initSession() {
       try {
+        // Automatically ensure system data is uploaded and synced to Firestore (Zero Mock Data)
+        if (db && isFirebaseConfigured()) {
+          uploadSystemDataToDatabase().catch((err) => {
+            console.warn('Initial system data upload note:', err);
+          });
+        }
+
         const props = await fetchProperties();
         if (mounted) {
           setProperties(props);
@@ -199,6 +209,12 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   };
 
+  const syncSystemData = async (): Promise<UploadSystemDataResult> => {
+    const result = await uploadSystemDataToDatabase();
+    await refreshUserData();
+    return result;
+  };
+
   const activeProperty = properties.find((p) => p.id === activePropertyId) || properties[0] || null;
 
   return (
@@ -214,6 +230,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         logout,
         switchProperty,
         refreshUserData,
+        syncSystemData,
       }}
     >
       {children}

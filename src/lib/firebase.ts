@@ -7,6 +7,7 @@ import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
 import { getAuth, Auth } from 'firebase/auth';
 import { getFirestore, Firestore } from 'firebase/firestore';
 import { FirebaseConfigState } from '../types';
+import appletConfig from '../../firebase-applet-config.json';
 
 const STORAGE_KEY = 'dormcare_firebase_config';
 
@@ -33,13 +34,15 @@ export function clearStoredFirebaseConfig(): void {
   localStorage.removeItem(STORAGE_KEY);
 }
 
+// Config from officially provisioned firebase-applet-config.json
 export const DEFAULT_FIREBASE_CONFIG: FirebaseConfigState = {
-  apiKey: 'AIzaSyAXCabVQnk0VqfCglvmiFSHeEtucZou3Mc',
-  authDomain: 'gen-lang-client-0068612636.firebaseapp.com',
-  projectId: 'gen-lang-client-0068612636',
-  storageBucket: 'gen-lang-client-0068612636.firebasestorage.app',
-  messagingSenderId: '294915648858',
-  appId: '1:294915648858:web:409ce3bd0544a4cd505763',
+  apiKey: appletConfig.apiKey,
+  authDomain: appletConfig.authDomain,
+  projectId: appletConfig.projectId,
+  firestoreDatabaseId: appletConfig.firestoreDatabaseId,
+  storageBucket: appletConfig.storageBucket,
+  messagingSenderId: appletConfig.messagingSenderId,
+  appId: appletConfig.appId,
 };
 
 export function getActiveFirebaseConfig(): FirebaseConfigState | null {
@@ -48,6 +51,7 @@ export function getActiveFirebaseConfig(): FirebaseConfigState | null {
     apiKey: import.meta.env.VITE_FIREBASE_API_KEY || '',
     authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '',
     projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || '',
+    firestoreDatabaseId: import.meta.env.VITE_FIREBASE_DATABASE_ID || '',
     storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || '',
     messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
     appId: import.meta.env.VITE_FIREBASE_APP_ID || '',
@@ -63,7 +67,7 @@ export function getActiveFirebaseConfig(): FirebaseConfigState | null {
     return stored;
   }
 
-  // Default to user's provided Firebase Project
+  // Default to officially provisioned project from firebase-applet-config.json
   return DEFAULT_FIREBASE_CONFIG;
 }
 
@@ -84,7 +88,9 @@ export function initFirebase() {
       primaryApp = getApp();
     }
     primaryAuth = getAuth(primaryApp);
-    primaryDb = getFirestore(primaryApp);
+    // CRITICAL: Connect to the provisioned database ID
+    const databaseId = config.firestoreDatabaseId || (appletConfig as any).firestoreDatabaseId;
+    primaryDb = databaseId ? getFirestore(primaryApp, databaseId) : getFirestore(primaryApp);
 
     return {
       app: primaryApp,

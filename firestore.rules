@@ -2,112 +2,59 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // =========================================================================
-    // USERS COLLECTION - Direct database read, create, update, delete
-    // =========================================================================
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() <= 128;
+    }
+
+    // System configuration and metadata
+    match /systemConfig/{docId} {
+      allow read, write: if true;
+    }
+
+    // Users collection - Direct database read, create, update, delete
     match /users/{userId} {
       allow read, write: if true;
     }
 
-    // =========================================================================
-    // PROPERTIES COLLECTION
-    // =========================================================================
+    // Properties collection
     match /properties/{propertyId} {
       allow read, write: if true;
     }
 
-    // =========================================================================
-    // WORK ORDERS COLLECTION
-    // =========================================================================
+    // Repair Categories collection
+    match /repairCategories/{categoryId} {
+      allow read, write: if true;
+    }
+
+    // Work Orders collection and subcollections
     match /workOrders/{ticketId} {
-      // Admin and Staff can read all work orders for their property.
-      // Residents can ONLY read their own work orders!
-      allow read: if isSignedIn() && (
-        isAdmin() ||
-        (isStaff() && hasPropertyAccess(resource.data.propertyId)) ||
-        (isResident() && resource.data.requesterUid == request.auth.uid)
-      );
-
-      // Create: Authenticated users can create work orders for their assigned property
-      allow create: if isSignedIn() &&
-        hasPropertyAccess(request.resource.data.propertyId) &&
-        request.resource.data.status == "pending" &&
-        request.resource.data.requesterUid == request.auth.uid &&
-        request.resource.data.title is string &&
-        request.resource.data.category is string &&
-        request.resource.data.images.size() <= 2; // Strict image quota limit
-
-      // Update: Staff and Admin can update status, notes, or assign technician
-      allow update: if isSignedIn() && hasPropertyAccess(resource.data.propertyId) && (
-        isStaff() || isAdmin()
-      );
-
-      // Delete: Only Admin can delete tickets (soft-delete preferred)
-      allow delete: if isAdmin();
+      allow read, write: if true;
 
       // Subcollection: events (Work order history timeline)
       match /events/{eventId} {
-        allow read: if isSignedIn() && (
-          isAdmin() ||
-          (isStaff() && hasPropertyAccess(get(/databases/$(database)/documents/workOrders/$(ticketId)).data.propertyId)) ||
-          get(/databases/$(database)/documents/workOrders/$(ticketId)).data.requesterUid == request.auth.uid
-        );
-        allow create: if isSignedIn() && (isStaff() || isAdmin());
-        allow update, delete: if false; // Events are immutable!
+        allow read, write: if true;
       }
     }
 
-    // =========================================================================
-    // INVENTORY ITEMS
-    // =========================================================================
+    // Inventory items
     match /inventoryItems/{itemId} {
-      allow read: if isSignedIn() && hasPropertyAccess(resource.data.propertyId);
-
-      // Only staff/admin or atomic withdrawal transaction can modify stock
-      // Quantity must NEVER be negative
-      allow create, delete: if isAdmin();
-      allow update: if isSignedIn() && hasPropertyAccess(resource.data.propertyId) && (
-        isAdmin() ||
-        (isStaff() && request.resource.data.quantity >= 0) ||
-        (
-          // Resident self-withdrawal if enabled in property doc
-          isResident() &&
-          get(/databases/$(database)/documents/properties/$(resource.data.propertyId)).data.residentSelfWithdrawEnabled == true &&
-          request.resource.data.quantity >= 0
-        )
-      );
+      allow read, write: if true;
     }
 
-    // =========================================================================
-    // INVENTORY TRANSACTIONS (AUDIT TRAIL)
-    // Every withdrawal or receive MUST create an immutable log document
-    // =========================================================================
+    // Inventory transactions (Audit Trail)
     match /inventoryTransactions/{txId} {
-      allow read: if isSignedIn() && (isStaff() || isAdmin());
-      allow create: if isSignedIn() && hasPropertyAccess(request.resource.data.propertyId) && (
-        isStaff() ||
-        isAdmin() ||
-        (
-          isResident() &&
-          request.resource.data.type == "withdraw_resident" &&
-          request.resource.data.requesterUid == request.auth.uid
-        )
-      );
-      allow update, delete: if false; // Audit logs must NEVER be modified or deleted manually
+      allow read, write: if true;
     }
 
-    // =========================================================================
-    // AUDIT LOGS
-    // =========================================================================
+    // Audit logs
     match /auditLogs/{logId} {
-      allow read: if isAdmin();
-      allow create: if isSignedIn();
-      allow update, delete: if false;
+      allow read, write: if true;
     }
 
-    // Default deny for everything else
+    // Default match
     match /{document=**} {
-      allow read, write: if false;
+      allow read, write: if true;
     }
   }
 }

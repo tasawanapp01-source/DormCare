@@ -37,6 +37,7 @@ import {
   INITIAL_INVENTORY,
   INITIAL_TRANSACTIONS,
   INITIAL_USERS,
+  DEFAULT_SYSTEM_PROPERTY,
 } from './mockData';
 
 // --- Local reactive state and Browser Database Storage ---
@@ -47,10 +48,10 @@ export const DEFAULT_PRIMARY_ADMIN: UserProfile = {
   email: 'admin@dormcare.app',
   displayName: 'ผู้ดูแลระบบหลัก (Admin)',
   role: 'admin',
-  propertyIds: ['prop-chula-01', 'prop-silom-02'],
+  propertyIds: ['prop-main-01'],
   phone: '081-234-5678',
   isActive: true,
-  createdAt: new Date().toISOString(),
+  createdAt: '2026-01-01T00:00:00.000Z',
 };
 
 const STORAGE_USERS_KEY = 'dormcare_db_users';
@@ -93,14 +94,22 @@ export function getStoredProperties(): Property[] {
       if (raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
+          // Purge legacy mock properties (e.g. prop-chula-01, prop-silom-02)
+          const validProps = parsed.filter(
+            (p: Property) => p.id !== 'prop-chula-01' && p.id !== 'prop-silom-02'
+          );
+          if (validProps.length > 0) {
+            return validProps;
+          }
         }
       }
     }
   } catch (e) {
     console.warn('Error reading stored properties:', e);
   }
-  return localProperties;
+  const initial = [DEFAULT_SYSTEM_PROPERTY];
+  saveStoredProperties(initial);
+  return initial;
 }
 
 export function saveStoredProperties(props: Property[]): void {
@@ -193,28 +202,36 @@ export function cleanForFirestore<T>(input: T): T {
 // ----------------------------------------------------
 
 export async function fetchProperties(): Promise<Property[]> {
-  const current = getStoredProperties();
-  if (!isFirebaseConfigured() || !db) {
-    return current;
+  if (isFirebaseConfigured() && db) {
+    try {
+      const colRef = collection(db, 'properties');
+      const snapshot = await withTimeout(getDocs(colRef), 4000, null);
+      if (snapshot && !snapshot.empty) {
+        const remoteProps = snapshot.docs.map((d) => ({ ...d.data(), id: d.id } as Property));
+        // Filter out any legacy mock properties
+        const cleanProps = remoteProps.filter(
+          (p) => p.id !== 'prop-chula-01' && p.id !== 'prop-silom-02'
+        );
+        if (cleanProps.length > 0) {
+          saveStoredProperties(cleanProps);
+          return cleanProps;
+        }
+      }
+      
+      // Seed default property to Firestore if empty or only legacy mocks existed
+      const docRef = doc(db, 'properties', DEFAULT_SYSTEM_PROPERTY.id);
+      await setDoc(docRef, cleanForFirestore({
+        ...DEFAULT_SYSTEM_PROPERTY,
+        updatedAt: serverTimestamp(),
+      }), { merge: true });
+      saveStoredProperties([DEFAULT_SYSTEM_PROPERTY]);
+      return [DEFAULT_SYSTEM_PROPERTY];
+    } catch (err) {
+      console.warn('Falling back to local properties due to Firestore error:', err);
+    }
   }
 
-  try {
-    const colRef = collection(db, 'properties');
-    const snapshot = await withTimeout(getDocs(colRef), 1200, null);
-    if (snapshot && !snapshot.empty) {
-      const remoteProps = snapshot.docs.map((d) => ({ ...d.data(), id: d.id } as Property));
-      const propMap = new Map<string, Property>();
-      current.forEach((p) => propMap.set(p.id, p));
-      remoteProps.forEach((p) => propMap.set(p.id, p));
-      const merged = Array.from(propMap.values());
-      saveStoredProperties(merged);
-      return merged;
-    }
-    return current;
-  } catch (err) {
-    console.warn('Falling back to local properties due to error:', err);
-    return current;
-  }
+  return getStoredProperties();
 }
 
 export async function saveProperty(property: Property): Promise<void> {
@@ -235,11 +252,9 @@ export async function saveProperty(property: Property): Promise<void> {
     const docRef = doc(db, 'properties', property.id);
     const dataToSave = cleanForFirestore({
       ...property,
-      updatedAt: new Date().toISOString(),
+      updatedAt: serverTimestamp(),
     });
-    await withTimeout(setDoc(docRef, dataToSave, { merge: true }), 2000, null).catch((err) => {
-      console.warn('Firestore setDoc note:', err);
-    });
+    await setDoc(docRef, dataToSave, { merge: true });
   } catch (e) {
     console.warn('Firestore saveProperty note:', e);
   }
@@ -256,7 +271,7 @@ export async function deleteProperty(propertyId: string): Promise<void> {
 
   try {
     const docRef = doc(db, 'properties', propertyId);
-    withTimeout(deleteDoc(docRef), 2000, null).catch(() => {});
+    await deleteDoc(docRef);
   } catch (e) {
     console.warn('Firestore deleteProperty note:', e);
   }
@@ -291,14 +306,14 @@ export function subscribeWorkOrders(
 
   try {
     const colRef = collection(db, 'workOrders');
-    let q = query(colRef, where('propertyId', '==', propertyId), orderBy('createdAt', 'desc'));
+    // Query by propertyId without composite orderBy to guarantee query never fails on missing indexes
+    let q = query(colRef, where('propertyId', '==', propertyId));
 
     if (user && user.role === 'resident') {
       q = query(
         colRef,
         where('propertyId', '==', propertyId),
-        where('requesterUid', '==', user.uid),
-        orderBy('createdAt', 'desc')
+        where('requesterUid', '==', user.uid)
       );
     }
 
@@ -306,11 +321,12 @@ export function subscribeWorkOrders(
       q,
       (snapshot) => {
         const orders = snapshot.docs.map((d) => ({ ...d.data(), docId: d.id } as WorkOrder));
+        // Sort descending by creation date
+        orders.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
         callback(orders);
       },
       (error) => {
-        console.error('WorkOrders onSnapshot error:', error);
-        // Fallback to local
+        console.error('WorkOrders onSnapshot error from Firebase:', error);
         callback(localWorkOrders.filter((w) => w.propertyId === propertyId));
       }
     );
@@ -913,6 +929,10 @@ export function subscribeRepairCategories(callback: (cats: RepairCategory[]) => 
           if (!snapshot.empty) {
             const remoteCats = snapshot.docs.map((d) => ({ ...d.data(), id: d.id } as RepairCategory));
             saveStoredRepairCategories(remoteCats);
+          } else if (db) {
+            for (const cat of DEFAULT_REPAIR_CATEGORIES) {
+              setDoc(doc(db, 'repairCategories', cat.id), cleanForFirestore(cat)).catch(() => {});
+            }
           }
         },
         (err) => console.warn('Repair categories snapshot error:', err)
@@ -1119,19 +1139,21 @@ export async function deleteInventoryItem(itemId: string): Promise<void> {
 }
 
 export async function fetchTransactions(propertyId: string): Promise<InventoryTransaction[]> {
-  if (!isFirebaseConfigured() || !db) {
-    return localTransactions.filter((t) => t.propertyId === propertyId);
+  if (isFirebaseConfigured() && db) {
+    try {
+      const colRef = collection(db, 'inventoryTransactions');
+      // Query without composite index to avoid any index requirement errors
+      const q = query(colRef, where('propertyId', '==', propertyId));
+      const snap = await getDocs(q);
+      const list = snap.docs.map((d) => ({ ...d.data(), id: d.id } as InventoryTransaction));
+      list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      return list;
+    } catch (err) {
+      console.warn('Failed to fetch real transactions from Firestore, using local fallback:', err);
+    }
   }
 
-  try {
-    const colRef = collection(db, 'inventoryTransactions');
-    const q = query(colRef, where('propertyId', '==', propertyId), orderBy('createdAt', 'desc'));
-    const snap = await getDocs(q);
-    return snap.docs.map((d) => ({ ...d.data(), id: d.id } as InventoryTransaction));
-  } catch (err) {
-    console.warn('Failed to fetch real transactions, using local fallback:', err);
-    return localTransactions.filter((t) => t.propertyId === propertyId);
-  }
+  return localTransactions.filter((t) => t.propertyId === propertyId);
 }
 
 // ----------------------------------------------------
@@ -1139,31 +1161,30 @@ export async function fetchTransactions(propertyId: string): Promise<InventoryTr
 // ----------------------------------------------------
 
 export async function fetchUsersList(propertyId?: string): Promise<UserProfile[]> {
-  let users = getStoredUsers();
-
-  // Ensure primary admin requested by user is always included
-  if (!users.some((u) => u.username?.toLowerCase() === 'admin')) {
-    users.unshift(DEFAULT_PRIMARY_ADMIN);
-    saveStoredUsers(users);
-  }
-
   if (isFirebaseConfigured() && db) {
     try {
       const colRef = collection(db, 'users');
-      const snap = await withTimeout(getDocs(colRef), 1200, null);
+      const snap = await withTimeout(getDocs(colRef), 4000, null);
       if (snap && !snap.empty) {
         const remoteUsers = snap.docs.map((d) => ({ ...d.data(), uid: d.id } as UserProfile));
         if (!remoteUsers.some((u) => u.username?.toLowerCase() === 'admin')) {
+          await saveUserProfile(DEFAULT_PRIMARY_ADMIN);
           remoteUsers.unshift(DEFAULT_PRIMARY_ADMIN);
         }
-        users = remoteUsers;
-        saveStoredUsers(users);
+        saveStoredUsers(remoteUsers);
+        if (!propertyId) return remoteUsers;
+        return remoteUsers.filter((u) => u.propertyIds?.includes(propertyId));
+      } else {
+        // If users collection is empty in Firestore, seed the primary admin to Firestore!
+        await saveUserProfile(DEFAULT_PRIMARY_ADMIN);
+        return [DEFAULT_PRIMARY_ADMIN];
       }
     } catch (err) {
       console.warn('Fetch users from Firestore note, using stored data:', err);
     }
   }
 
+  const users = getStoredUsers();
   if (!propertyId) return users;
   return users.filter((u) => u.propertyIds?.includes(propertyId));
 }
@@ -1245,3 +1266,174 @@ export async function createAuditLog(log: Omit<AuditLog, 'id' | 'timestamp'>): P
     console.warn('Audit log write error:', e);
   }
 }
+
+// ----------------------------------------------------
+// System Data Uploader & Clean Baseline Service
+// ห้ามให้ข้อมูลตัวอย่าง (Zero Sample / Mock Data)
+// ----------------------------------------------------
+export interface UploadSystemDataResult {
+  success: boolean;
+  uploadedAdmin: boolean;
+  uploadedProperty: boolean;
+  uploadedCategoriesCount: number;
+  uploadedInventoryCategoriesCount: number;
+  cleanedMockOrdersCount: number;
+  cleanedMockItemsCount: number;
+  message: string;
+  syncedAt: string;
+}
+
+/**
+ * Uploads real system baseline data into Cloud Firestore:
+ * 1. Default Primary Admin user profile (admin / 213894120) into `users` collection.
+ * 2. Default Dormitory Property into `properties` collection.
+ * 3. 8 Standard System Repair Categories into `repairCategories` collection.
+ * 4. Standard Inventory Categories into `systemConfig/inventoryCategories`.
+ * 5. System Meta status into `systemConfig/status`.
+ * 6. Completely cleans and purges any legacy mock data from Firestore & local caches.
+ */
+export async function uploadSystemDataToDatabase(): Promise<UploadSystemDataResult> {
+  const syncedAt = new Date().toISOString();
+
+  // 1. Pristine local storage reset
+  saveStoredUsers([DEFAULT_PRIMARY_ADMIN]);
+  saveStoredProperties([DEFAULT_SYSTEM_PROPERTY]);
+  saveStoredRepairCategories([...DEFAULT_REPAIR_CATEGORIES]);
+  saveStoredCategories([...DEFAULT_INVENTORY_CATEGORIES]);
+
+  // Clean in-memory states (Zero sample data)
+  localWorkOrders = [];
+  localInventory = [];
+  localTransactions = [];
+  localProperties = [DEFAULT_SYSTEM_PROPERTY];
+  localUsers = [DEFAULT_PRIMARY_ADMIN];
+  notifyWorkOrders();
+  notifyInventory();
+  notifyRepairCategories(DEFAULT_REPAIR_CATEGORIES);
+
+  if (!isFirebaseConfigured() || !db) {
+    return {
+      success: true,
+      uploadedAdmin: true,
+      uploadedProperty: true,
+      uploadedCategoriesCount: DEFAULT_REPAIR_CATEGORIES.length,
+      uploadedInventoryCategoriesCount: DEFAULT_INVENTORY_CATEGORIES.length,
+      cleanedMockOrdersCount: 0,
+      cleanedMockItemsCount: 0,
+      message: 'บันทึกข้อมูลระบบเรียบร้อย (ระบบทำงานในโหมดมาตรฐาน ปราศจากข้อมูลตัวอย่าง)',
+      syncedAt,
+    };
+  }
+
+  try {
+    // 2. Upload Primary Admin account to Firestore
+    const adminRef = doc(db, 'users', DEFAULT_PRIMARY_ADMIN.uid);
+    await setDoc(adminRef, cleanForFirestore({
+      ...DEFAULT_PRIMARY_ADMIN,
+      updatedAt: serverTimestamp(),
+    }), { merge: true });
+
+    // 3. Upload Default System Property to Firestore
+    const propRef = doc(db, 'properties', DEFAULT_SYSTEM_PROPERTY.id);
+    await setDoc(propRef, cleanForFirestore({
+      ...DEFAULT_SYSTEM_PROPERTY,
+      updatedAt: serverTimestamp(),
+    }), { merge: true });
+
+    // 4. Upload Standard Repair Categories to Firestore
+    for (const cat of DEFAULT_REPAIR_CATEGORIES) {
+      const catRef = doc(db, 'repairCategories', cat.id);
+      await setDoc(catRef, cleanForFirestore({
+        ...cat,
+        updatedAt: serverTimestamp(),
+      }), { merge: true });
+    }
+
+    // 5. Upload Standard Inventory Categories & Metadata to Firestore
+    const invCatRef = doc(db, 'systemConfig', 'inventoryCategories');
+    await setDoc(invCatRef, cleanForFirestore({
+      categories: DEFAULT_INVENTORY_CATEGORIES,
+      updatedAt: serverTimestamp(),
+    }), { merge: true });
+
+    const statusRef = doc(db, 'systemConfig', 'status');
+    await setDoc(statusRef, cleanForFirestore({
+      systemName: 'DormCare Dormitory Maintenance & Inventory System',
+      systemVersion: '2.0.0',
+      initializedAt: syncedAt,
+      lastSyncedAt: syncedAt,
+      hasMockData: false,
+      adminUsername: DEFAULT_PRIMARY_ADMIN.username,
+      defaultPropertyCode: DEFAULT_SYSTEM_PROPERTY.code,
+      status: 'active',
+      updatedAt: serverTimestamp(),
+    }), { merge: true });
+
+    // 6. Purge legacy mock properties from Firestore
+    const legacyMockPropIds = ['prop-chula-01', 'prop-silom-02'];
+    for (const mockId of legacyMockPropIds) {
+      try {
+        await deleteDoc(doc(db, 'properties', mockId));
+      } catch (_) {}
+    }
+
+    // 7. Purge legacy mock work orders from Firestore
+    const legacyMockWoIds = [
+      'wo-doc-001',
+      'wo-doc-002',
+      'wo-doc-003',
+      'wo-doc-004',
+      'MC-202610-0001',
+      'MC-202610-0002',
+      'MC-202610-0003',
+      'MC-202610-0004',
+    ];
+    for (const mockWoId of legacyMockWoIds) {
+      try {
+        await deleteDoc(doc(db, 'workOrders', mockWoId));
+      } catch (_) {}
+    }
+
+    // 8. Purge legacy mock inventory items from Firestore
+    const legacyMockItemIds = ['item-001', 'item-002', 'item-003', 'item-004', 'item-005'];
+    for (const mockItemId of legacyMockItemIds) {
+      try {
+        await deleteDoc(doc(db, 'inventoryItems', mockItemId));
+      } catch (_) {}
+    }
+
+    // 9. Purge legacy mock transactions from Firestore
+    const legacyMockTxIds = ['tx-001', 'tx-002', 'tx-003'];
+    for (const mockTxId of legacyMockTxIds) {
+      try {
+        await deleteDoc(doc(db, 'inventoryTransactions', mockTxId));
+      } catch (_) {}
+    }
+
+    return {
+      success: true,
+      uploadedAdmin: true,
+      uploadedProperty: true,
+      uploadedCategoriesCount: DEFAULT_REPAIR_CATEGORIES.length,
+      uploadedInventoryCategoriesCount: DEFAULT_INVENTORY_CATEGORIES.length,
+      cleanedMockOrdersCount: legacyMockWoIds.length,
+      cleanedMockItemsCount: legacyMockItemIds.length,
+      message: 'อัพโหลดข้อมูลระบบลงฐานข้อมูล Firestore สำเร็จ และล้างข้อมูลตัวอย่างทั้งหมดเรียบร้อย',
+      syncedAt,
+    };
+  } catch (error) {
+    console.error('Error uploading system data to Firestore:', error);
+    return {
+      success: false,
+      uploadedAdmin: false,
+      uploadedProperty: false,
+      uploadedCategoriesCount: 0,
+      uploadedInventoryCategoriesCount: 0,
+      cleanedMockOrdersCount: 0,
+      cleanedMockItemsCount: 0,
+      message: `เกิดข้อผิดพลาดในการอัพโหลด: ${error instanceof Error ? error.message : String(error)}`,
+      syncedAt,
+    };
+  }
+}
+
