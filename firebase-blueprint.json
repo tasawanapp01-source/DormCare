@@ -20,7 +20,7 @@
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
       },
-      "required": ["uid", "username", "role", "displayName"]
+      "required": ["uid", "displayName", "role", "propertyIds"]
     },
     "Property": {
       "title": "Property",

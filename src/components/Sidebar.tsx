@@ -205,7 +205,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 )}
                 {isResident(userProfile) && (
                   <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-emerald-400 bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800/50">
-                    <User className="w-2.5 h-2.5" /> ผู้พักห้อง {userProfile?.roomId || '-'}
+                    <User className="w-2.5 h-2.5" /> ผู้ใช้งาน
                   </span>
                 )}
               </div>

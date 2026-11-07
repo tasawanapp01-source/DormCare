@@ -13,16 +13,15 @@ import {
   deleteDoc,
   query,
   where,
-  orderBy,
   onSnapshot,
   runTransaction,
   serverTimestamp,
   addDoc,
+  getDocFromServer,
 } from 'firebase/firestore';
-import { db, isFirebaseConfigured } from './firebase';
+import { db, auth, isFirebaseConfigured } from './firebase';
 import {
   WorkOrder,
-  WorkOrderEvent,
   InventoryItem,
   InventoryTransaction,
   Property,
@@ -31,16 +30,78 @@ import {
   AuditLog,
   RepairCategory,
 } from '../types';
-import {
-  INITIAL_PROPERTIES,
-  INITIAL_WORK_ORDERS,
-  INITIAL_INVENTORY,
-  INITIAL_TRANSACTIONS,
-  INITIAL_USERS,
-  DEFAULT_SYSTEM_PROPERTY,
-} from './mockData';
 
-// --- Local reactive state and Browser Database Storage ---
+// ============================================================================
+// Standard Error Handling (Firebase Skill Standard)
+// ============================================================================
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+export interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  };
+}
+
+export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const currentAuth = auth?.currentUser;
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: currentAuth?.uid || null,
+      email: currentAuth?.email || null,
+      emailVerified: currentAuth?.emailVerified || null,
+      isAnonymous: currentAuth?.isAnonymous || null,
+      tenantId: currentAuth?.tenantId || null,
+      providerInfo: currentAuth?.providerData?.map((p) => ({
+        providerId: p.providerId,
+        email: p.email,
+      })) || [],
+    },
+    operationType,
+    path,
+  };
+  console.error('Firestore Error:', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
+// ============================================================================
+// Validate Connection to Firestore (Firebase Skill Standard)
+// ============================================================================
+export async function testConnection(): Promise<boolean> {
+  if (!db) return false;
+  try {
+    await getDocFromServer(doc(db, 'test', 'connection'));
+    return true;
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.error('Please check your Firebase configuration.');
+      return false;
+    }
+    return true;
+  }
+}
+
+// ============================================================================
+// Base System Templates (No Mock Data - Direct Firestore Seeders)
+// ============================================================================
 export const DEFAULT_PRIMARY_ADMIN: UserProfile = {
   uid: 'user-admin-primary',
   username: 'admin',
@@ -54,108 +115,32 @@ export const DEFAULT_PRIMARY_ADMIN: UserProfile = {
   createdAt: '2026-01-01T00:00:00.000Z',
 };
 
-const STORAGE_USERS_KEY = 'dormcare_db_users';
-const STORAGE_PROPERTIES_KEY = 'dormcare_db_properties';
+export const DEFAULT_SYSTEM_PROPERTY: Property = {
+  id: 'prop-main-01',
+  code: 'DORM-01',
+  name: 'หอพักหลัก (Main Dormitory)',
+  residentSelfWithdrawEnabled: true,
+  isActive: true,
+  createdAt: '2026-01-01T00:00:00.000Z',
+};
 
-export function getStoredUsers(): UserProfile[] {
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      const raw = window.localStorage.getItem(STORAGE_USERS_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
-        }
-      }
-    }
-  } catch (e) {
-    console.warn('Error reading stored users:', e);
-  }
-  const initial = [DEFAULT_PRIMARY_ADMIN];
-  saveStoredUsers(initial);
-  return initial;
-}
+export const DEFAULT_REPAIR_CATEGORIES: RepairCategory[] = [
+  { id: 'plumbing', name: 'ระบบประปา / สุขภัณฑ์ / ท่อตัน', isDefault: true },
+  { id: 'electrical', name: 'ระบบไฟฟ้า / หลอดไฟ / สวิตช์', isDefault: true },
+  { id: 'aircon', name: 'เครื่องปรับอากาศ / แอร์', isDefault: true },
+  { id: 'furniture', name: 'เฟอร์นิเจอร์ / ประตู / ลูกบิด / หน้าต่าง', isDefault: true },
+  { id: 'appliance', name: 'เครื่องใช้ไฟฟ้าส่วนกลาง', isDefault: true },
+  { id: 'structural', name: 'โครงสร้าง / ผนัง / ฝ้าเพดาน / หลังคา', isDefault: true },
+  { id: 'sanitary', name: 'ความสะอาด / ขยะ / สิ่งแวดล้อม', isDefault: true },
+  { id: 'other', name: 'อื่นๆ', isDefault: true },
+];
 
-export function saveStoredUsers(users: UserProfile[]): void {
-  localUsers = users;
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      window.localStorage.setItem(STORAGE_USERS_KEY, JSON.stringify(users));
-    }
-  } catch (e) {
-    console.warn('Error writing stored users:', e);
-  }
-}
+export const DEFAULT_INVENTORY_CATEGORIES = ['งานประปา', 'งานไฟฟ้า', 'งานเครื่องปรับอากาศ', 'งานเฟอร์นิเจอร์', 'งานสีและโครงสร้าง', 'งานสุขภัณฑ์'];
 
-export function getStoredProperties(): Property[] {
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      const raw = window.localStorage.getItem(STORAGE_PROPERTIES_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          // Purge legacy mock properties (e.g. prop-chula-01, prop-silom-02)
-          const validProps = parsed.filter(
-            (p: Property) => p.id !== 'prop-chula-01' && p.id !== 'prop-silom-02'
-          );
-          if (validProps.length > 0) {
-            return validProps;
-          }
-        }
-      }
-    }
-  } catch (e) {
-    console.warn('Error reading stored properties:', e);
-  }
-  const initial = [DEFAULT_SYSTEM_PROPERTY];
-  saveStoredProperties(initial);
-  return initial;
-}
+// In-memory cache for fast sync
+let cachedRepairCategories: RepairCategory[] = [...DEFAULT_REPAIR_CATEGORIES];
+let cachedInventoryCategories: string[] = [...DEFAULT_INVENTORY_CATEGORIES];
 
-export function saveStoredProperties(props: Property[]): void {
-  localProperties = props;
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      window.localStorage.setItem(STORAGE_PROPERTIES_KEY, JSON.stringify(props));
-    }
-  } catch (e) {
-    console.warn('Error writing stored properties:', e);
-  }
-}
-
-export async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
-  let timer: any;
-  const timeoutPromise = new Promise<T>((resolve) => {
-    timer = setTimeout(() => resolve(fallback), timeoutMs);
-  });
-  try {
-    const res = await Promise.race([promise, timeoutPromise]);
-    clearTimeout(timer);
-    return res;
-  } catch (err) {
-    clearTimeout(timer);
-    return fallback;
-  }
-}
-
-let localProperties: Property[] = [...INITIAL_PROPERTIES];
-let localWorkOrders: WorkOrder[] = [...INITIAL_WORK_ORDERS];
-let localInventory: InventoryItem[] = [...INITIAL_INVENTORY];
-let localTransactions: InventoryTransaction[] = [...INITIAL_TRANSACTIONS];
-let localUsers: UserProfile[] = [...INITIAL_USERS];
-
-const workOrderListeners: Array<(orders: WorkOrder[]) => void> = [];
-const inventoryListeners: Array<(items: InventoryItem[]) => void> = [];
-
-function notifyWorkOrders() {
-  workOrderListeners.forEach((fn) => fn([...localWorkOrders]));
-}
-
-function notifyInventory() {
-  inventoryListeners.forEach((fn) => fn([...localInventory]));
-}
-
-// Helper to generate next unique Ticket ID e.g. MC-202610-0005
 export function generateTicketCode(): string {
   const now = new Date();
   const year = now.getFullYear();
@@ -164,12 +149,6 @@ export function generateTicketCode(): string {
   return `MC-${year}${month}-${randomSuffix}`;
 }
 
-/**
- * Recursively removes all keys with `undefined` values from an object or nested objects/arrays.
- * Preserves Firestore FieldValues (such as serverTimestamp()), Dates, etc.
- * This completely prevents Firestore's:
- * "Function setDoc() called with invalid data. Unsupported field value: undefined"
- */
 export function cleanForFirestore<T>(input: T): T {
   if (input === null || input === undefined) {
     return input;
@@ -197,116 +176,233 @@ export function cleanForFirestore<T>(input: T): T {
   return input;
 }
 
-// ----------------------------------------------------
-// Properties Service
-// ----------------------------------------------------
+export async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  let timer: any;
+  const timeoutPromise = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), timeoutMs);
+  });
+  try {
+    const res = await Promise.race([promise, timeoutPromise]);
+    clearTimeout(timer);
+    return res;
+  } catch (err) {
+    clearTimeout(timer);
+    return fallback;
+  }
+}
+
+// Compatibility helper for authContext
+export function getStoredUsers(): UserProfile[] {
+  return [DEFAULT_PRIMARY_ADMIN];
+}
+
+export function saveStoredUsers(_users: UserProfile[]): void {
+  // Stored directly in Firestore
+}
+
+export function getStoredProperties(): Property[] {
+  return [DEFAULT_SYSTEM_PROPERTY];
+}
+
+export function saveStoredProperties(_props: Property[]): void {
+  // Stored directly in Firestore
+}
+
+// ============================================================================
+// Properties Service (Direct Firebase Cloud Firestore)
+// ============================================================================
 
 export async function fetchProperties(): Promise<Property[]> {
-  if (isFirebaseConfigured() && db) {
-    try {
-      const colRef = collection(db, 'properties');
-      const snapshot = await withTimeout(getDocs(colRef), 4000, null);
-      if (snapshot && !snapshot.empty) {
-        const remoteProps = snapshot.docs.map((d) => ({ ...d.data(), id: d.id } as Property));
-        // Filter out any legacy mock properties
-        const cleanProps = remoteProps.filter(
-          (p) => p.id !== 'prop-chula-01' && p.id !== 'prop-silom-02'
-        );
-        if (cleanProps.length > 0) {
-          saveStoredProperties(cleanProps);
-          return cleanProps;
-        }
-      }
-      
-      // Seed default property to Firestore if empty or only legacy mocks existed
-      const docRef = doc(db, 'properties', DEFAULT_SYSTEM_PROPERTY.id);
-      await setDoc(docRef, cleanForFirestore({
-        ...DEFAULT_SYSTEM_PROPERTY,
-        updatedAt: serverTimestamp(),
-      }), { merge: true });
-      saveStoredProperties([DEFAULT_SYSTEM_PROPERTY]);
-      return [DEFAULT_SYSTEM_PROPERTY];
-    } catch (err) {
-      console.warn('Falling back to local properties due to Firestore error:', err);
-    }
+  if (!db) {
+    return [DEFAULT_SYSTEM_PROPERTY];
   }
+  const colPath = 'properties';
+  try {
+    const colRef = collection(db, colPath);
+    const snapshot = await withTimeout(getDocs(colRef), 5000, null);
+    if (snapshot && !snapshot.empty) {
+      const remoteProps = snapshot.docs.map((d) => ({ ...d.data(), id: d.id } as Property));
+      const validProps = remoteProps.filter(
+        (p) => p.id !== 'prop-chula-01' && p.id !== 'prop-silom-02'
+      );
+      if (validProps.length > 0) {
+        return validProps;
+      }
+    }
 
-  return getStoredProperties();
+    // Seed default property directly to Firestore
+    const docRef = doc(db, colPath, DEFAULT_SYSTEM_PROPERTY.id);
+    await setDoc(
+      docRef,
+      cleanForFirestore({
+        ...DEFAULT_SYSTEM_PROPERTY,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      }),
+      { merge: true }
+    );
+    return [DEFAULT_SYSTEM_PROPERTY];
+  } catch (err) {
+    console.error('Failed to fetch properties from Firestore:', err);
+    return [DEFAULT_SYSTEM_PROPERTY];
+  }
 }
 
 export async function saveProperty(property: Property): Promise<void> {
-  const props = getStoredProperties();
-  const idx = props.findIndex((p) => p.id === property.id);
-  if (idx >= 0) {
-    props[idx] = property;
-  } else {
-    props.push(property);
-  }
-  saveStoredProperties(props);
-
-  if (!isFirebaseConfigured() || !db) {
-    return;
-  }
-
+  if (!db) return;
+  const docPath = `properties/${property.id}`;
   try {
     const docRef = doc(db, 'properties', property.id);
-    const dataToSave = cleanForFirestore({
-      ...property,
-      updatedAt: serverTimestamp(),
-    });
-    await setDoc(docRef, dataToSave, { merge: true });
+    await setDoc(
+      docRef,
+      cleanForFirestore({
+        ...property,
+        updatedAt: serverTimestamp(),
+      }),
+      { merge: true }
+    );
   } catch (e) {
-    console.warn('Firestore saveProperty note:', e);
+    handleFirestoreError(e, OperationType.WRITE, docPath);
   }
 }
 
 export async function deleteProperty(propertyId: string): Promise<void> {
-  let props = getStoredProperties();
-  props = props.filter((p) => p.id !== propertyId);
-  saveStoredProperties(props);
-
-  if (!isFirebaseConfigured() || !db) {
-    return;
-  }
-
+  if (!db) return;
+  const docPath = `properties/${propertyId}`;
   try {
     const docRef = doc(db, 'properties', propertyId);
     await deleteDoc(docRef);
   } catch (e) {
-    console.warn('Firestore deleteProperty note:', e);
+    handleFirestoreError(e, OperationType.DELETE, docPath);
   }
 }
 
-// ----------------------------------------------------
-// Work Orders Service (with onSnapshot Realtime updates)
-// ----------------------------------------------------
+// ============================================================================
+// Users Service (Direct Firebase Cloud Firestore)
+// ============================================================================
+
+export async function fetchUsersList(propertyId?: string): Promise<UserProfile[]> {
+  if (!db) {
+    return [DEFAULT_PRIMARY_ADMIN];
+  }
+  const colPath = 'users';
+  try {
+    const colRef = collection(db, colPath);
+    const snap = await withTimeout(getDocs(colRef), 5000, null);
+    if (snap && !snap.empty) {
+      let remoteUsers = snap.docs.map((d) => ({ ...d.data(), uid: d.id } as UserProfile));
+      // Ensure primary admin always exists in Firestore
+      if (!remoteUsers.some((u) => u.username?.toLowerCase() === 'admin')) {
+        await saveUserProfile(DEFAULT_PRIMARY_ADMIN);
+        remoteUsers.unshift(DEFAULT_PRIMARY_ADMIN);
+      }
+      if (propertyId) {
+        remoteUsers = remoteUsers.filter((u) => u.propertyIds?.includes(propertyId));
+      }
+      return remoteUsers;
+    } else {
+      // Seed initial admin to Firestore
+      await saveUserProfile(DEFAULT_PRIMARY_ADMIN);
+      return [DEFAULT_PRIMARY_ADMIN];
+    }
+  } catch (err) {
+    console.error('Error fetching users from Firestore:', err);
+    return [DEFAULT_PRIMARY_ADMIN];
+  }
+}
+
+export function subscribeUsersList(callback: (users: UserProfile[]) => void): () => void {
+  if (!db) {
+    callback([DEFAULT_PRIMARY_ADMIN]);
+    return () => {};
+  }
+  const colPath = 'users';
+  try {
+    const colRef = collection(db, colPath);
+    const unsubscribe = onSnapshot(
+      colRef,
+      async (snapshot) => {
+        if (!snapshot.empty) {
+          const list = snapshot.docs.map((d) => ({ ...d.data(), uid: d.id } as UserProfile));
+          if (!list.some((u) => u.username?.toLowerCase() === 'admin')) {
+            await saveUserProfile(DEFAULT_PRIMARY_ADMIN);
+            list.unshift(DEFAULT_PRIMARY_ADMIN);
+          }
+          callback(list);
+        } else {
+          await saveUserProfile(DEFAULT_PRIMARY_ADMIN);
+          callback([DEFAULT_PRIMARY_ADMIN]);
+        }
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.GET, colPath);
+      }
+    );
+    return unsubscribe;
+  } catch (err) {
+    console.error('Failed to subscribe users list from Firestore:', err);
+    return () => {};
+  }
+}
+
+export async function saveUserProfile(user: UserProfile): Promise<void> {
+  if (!db) return;
+  const docPath = `users/${user.uid}`;
+  try {
+    const docRef = doc(db, 'users', user.uid);
+    const dataToSave = cleanForFirestore({
+      ...user,
+      updatedAt: serverTimestamp(),
+    });
+    await setDoc(docRef, dataToSave, { merge: true });
+  } catch (e) {
+    handleFirestoreError(e, OperationType.WRITE, docPath);
+  }
+}
+
+export async function updateUserProfile(uid: string, updates: Partial<UserProfile>): Promise<void> {
+  if (!db) return;
+  const docPath = `users/${uid}`;
+  try {
+    const docRef = doc(db, 'users', uid);
+    const dataToUpdate = cleanForFirestore({
+      ...updates,
+      updatedAt: serverTimestamp(),
+    });
+    await updateDoc(docRef, dataToUpdate);
+  } catch (e) {
+    handleFirestoreError(e, OperationType.UPDATE, docPath);
+  }
+}
+
+export async function deleteUserProfile(uid: string): Promise<void> {
+  if (!db) return;
+  const docPath = `users/${uid}`;
+  try {
+    const docRef = doc(db, 'users', uid);
+    await deleteDoc(docRef);
+  } catch (e) {
+    handleFirestoreError(e, OperationType.DELETE, docPath);
+  }
+}
+
+// ============================================================================
+// Work Orders Service (Real-time Firebase Cloud Firestore)
+// ============================================================================
 
 export function subscribeWorkOrders(
   propertyId: string,
   user: UserProfile | null,
   callback: (orders: WorkOrder[]) => void
 ): () => void {
-  if (!isFirebaseConfigured() || !db) {
-    const filterAndEmit = () => {
-      let filtered = localWorkOrders.filter((w) => w.propertyId === propertyId);
-      if (user && user.role === 'resident') {
-        filtered = filtered.filter((w) => w.requesterUid === user.uid);
-      }
-      callback(filtered);
-    };
-
-    filterAndEmit();
-    workOrderListeners.push(filterAndEmit);
-
-    return () => {
-      const idx = workOrderListeners.indexOf(filterAndEmit);
-      if (idx >= 0) workOrderListeners.splice(idx, 1);
-    };
+  if (!db) {
+    callback([]);
+    return () => {};
   }
 
+  const colPath = 'workOrders';
   try {
-    const colRef = collection(db, 'workOrders');
-    // Query by propertyId without composite orderBy to guarantee query never fails on missing indexes
+    const colRef = collection(db, colPath);
     let q = query(colRef, where('propertyId', '==', propertyId));
 
     if (user && user.role === 'resident') {
@@ -321,29 +417,34 @@ export function subscribeWorkOrders(
       q,
       (snapshot) => {
         const orders = snapshot.docs.map((d) => ({ ...d.data(), docId: d.id } as WorkOrder));
-        // Sort descending by creation date
         orders.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
         callback(orders);
       },
       (error) => {
-        console.error('WorkOrders onSnapshot error from Firebase:', error);
-        callback(localWorkOrders.filter((w) => w.propertyId === propertyId));
+        console.error('WorkOrders snapshot error from Firestore:', error);
+        callback([]);
       }
     );
 
     return unsubscribe;
   } catch (err) {
     console.error('Failed to setup WorkOrders snapshot:', err);
-    callback(localWorkOrders.filter((w) => w.propertyId === propertyId));
+    callback([]);
     return () => {};
   }
 }
 
-export async function createWorkOrder(data: Omit<WorkOrder, 'docId' | 'id' | 'createdAt' | 'updatedAt'>): Promise<string> {
+export async function createWorkOrder(
+  data: Omit<WorkOrder, 'docId' | 'id' | 'createdAt' | 'updatedAt'>
+): Promise<string> {
+  if (!db) {
+    throw new Error('ไม่สามารถเชื่อมต่อฐานข้อมูล Firebase Cloud Firestore ได้');
+  }
+
   const ticketId = generateTicketCode();
   const now = new Date();
   const createdAt = now.toISOString();
-  const expiresDate = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000); // 365 days retention
+  const expiresDate = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000);
   const expiresAt = expiresDate.toISOString();
 
   const fullOrder: WorkOrder = {
@@ -357,32 +458,36 @@ export async function createWorkOrder(data: Omit<WorkOrder, 'docId' | 'id' | 'cr
     expiresAt,
   };
 
-  if (!isFirebaseConfigured() || !db) {
-    localWorkOrders.unshift(fullOrder);
-    notifyWorkOrders();
+  const docPath = `workOrders/${ticketId}`;
+  try {
+    const docRef = doc(db, 'workOrders', ticketId);
+    await setDoc(
+      docRef,
+      cleanForFirestore({
+        ...fullOrder,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    const eventRef = collection(db, 'workOrders', ticketId, 'events');
+    await addDoc(
+      eventRef,
+      cleanForFirestore({
+        ticketId,
+        status: 'pending',
+        note: 'สร้างใบแจ้งซ่อมเข้าระบบ',
+        performedByUid: data.requesterUid,
+        performedByName: data.requesterName,
+        timestamp: serverTimestamp(),
+      })
+    );
+
+    return ticketId;
+  } catch (e) {
+    handleFirestoreError(e, OperationType.WRITE, docPath);
     return ticketId;
   }
-
-  // Real Firestore write
-  const docRef = doc(db, 'workOrders', ticketId);
-  await setDoc(docRef, cleanForFirestore({
-    ...fullOrder,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  }));
-
-  // Record initial event in subcollection
-  const eventRef = collection(db, 'workOrders', ticketId, 'events');
-  await addDoc(eventRef, cleanForFirestore({
-    ticketId,
-    status: 'pending',
-    note: 'สร้างใบแจ้งซ่อมเข้าระบบ',
-    performedByUid: data.requesterUid,
-    performedByName: data.requesterName,
-    timestamp: serverTimestamp(),
-  }));
-
-  return ticketId;
 }
 
 export async function updateWorkOrderStatus(
@@ -392,66 +497,55 @@ export async function updateWorkOrderStatus(
   user: UserProfile,
   extraUpdates: Partial<WorkOrder> = {}
 ): Promise<void> {
-  const now = new Date().toISOString();
-
-  if (!isFirebaseConfigured() || !db) {
-    const idx = localWorkOrders.findIndex((w) => w.id === workOrder.id);
-    if (idx >= 0) {
-      localWorkOrders[idx] = {
-        ...localWorkOrders[idx],
-        ...extraUpdates,
-        status: newStatus,
-        updatedAt: now,
-      };
-      notifyWorkOrders();
-    }
-    return;
+  if (!db) {
+    throw new Error('ไม่สามารถเชื่อมต่อฐานข้อมูล Firebase Cloud Firestore ได้');
   }
 
-  const docRef = doc(db, 'workOrders', workOrder.id);
-  await updateDoc(docRef, cleanForFirestore({
-    ...extraUpdates,
-    status: newStatus,
-    updatedAt: serverTimestamp(),
-  }));
+  const docPath = `workOrders/${workOrder.id}`;
+  try {
+    const docRef = doc(db, 'workOrders', workOrder.id);
+    await updateDoc(
+      docRef,
+      cleanForFirestore({
+        ...extraUpdates,
+        status: newStatus,
+        updatedAt: serverTimestamp(),
+      })
+    );
 
-  // Write immutable event to subcollection
-  const eventRef = collection(db, 'workOrders', workOrder.id, 'events');
-  await addDoc(eventRef, cleanForFirestore({
-    ticketId: workOrder.id,
-    status: newStatus,
-    note,
-    performedByUid: user.uid,
-    performedByName: user.displayName,
-    timestamp: serverTimestamp(),
-  }));
+    const eventRef = collection(db, 'workOrders', workOrder.id, 'events');
+    await addDoc(
+      eventRef,
+      cleanForFirestore({
+        ticketId: workOrder.id,
+        status: newStatus,
+        note,
+        performedByUid: user.uid,
+        performedByName: user.displayName,
+        timestamp: serverTimestamp(),
+      })
+    );
+  } catch (e) {
+    handleFirestoreError(e, OperationType.UPDATE, docPath);
+  }
 }
 
-// ----------------------------------------------------
-// Inventory Service (with Atomic Transactions)
-// ----------------------------------------------------
+// ============================================================================
+// Inventory Service (Direct Firebase Cloud Firestore with Atomic Transactions)
+// ============================================================================
 
 export function subscribeInventory(
   propertyId: string,
   callback: (items: InventoryItem[]) => void
 ): () => void {
-  if (!isFirebaseConfigured() || !db) {
-    const filterAndEmit = () => {
-      const filtered = localInventory.filter((i) => i.propertyId === propertyId);
-      callback(filtered);
-    };
-
-    filterAndEmit();
-    inventoryListeners.push(filterAndEmit);
-
-    return () => {
-      const idx = inventoryListeners.indexOf(filterAndEmit);
-      if (idx >= 0) inventoryListeners.splice(idx, 1);
-    };
+  if (!db) {
+    callback([]);
+    return () => {};
   }
 
+  const colPath = 'inventoryItems';
   try {
-    const colRef = collection(db, 'inventoryItems');
+    const colRef = collection(db, colPath);
     const q = query(colRef, where('propertyId', '==', propertyId));
 
     const unsubscribe = onSnapshot(
@@ -461,25 +555,19 @@ export function subscribeInventory(
         callback(items);
       },
       (error) => {
-        console.error('Inventory onSnapshot error:', error);
-        callback(localInventory.filter((i) => i.propertyId === propertyId));
+        console.error('Inventory snapshot error from Firestore:', error);
+        callback([]);
       }
     );
 
     return unsubscribe;
   } catch (err) {
     console.error('Failed to setup inventory snapshot:', err);
-    callback(localInventory.filter((i) => i.propertyId === propertyId));
+    callback([]);
     return () => {};
   }
 }
 
-/**
- * ATOMIC WITHDRAWAL:
- * Validates available stock, deducts quantity, logs inventory transaction,
- * and updates work order's materialsUsed list in a single atomic transaction.
- * Prevents negative stock and race conditions!
- */
 export async function withdrawInventoryItemAtomic(params: {
   propertyId: string;
   itemId: string;
@@ -498,84 +586,11 @@ export async function withdrawInventoryItemAtomic(params: {
   if (quantity <= 0) {
     throw new Error('จำนวนที่เบิกต้องมากกว่า 0');
   }
-
-  // --- DEMO / LOCAL FALLBACK WITH ATOMIC SIMULATION ---
-  if (!isFirebaseConfigured() || !db) {
-    const itemIndex = localInventory.findIndex((i) => i.id === itemId && i.propertyId === propertyId);
-    if (itemIndex === -1) {
-      throw new Error('ไม่พบข้อมูลวัสดุในระบบ');
-    }
-
-    const currentItem = localInventory[itemIndex];
-    if (currentItem.quantity < quantity) {
-      throw new Error(`สต็อกไม่เพียงพอ! คงเหลือเพียง ${currentItem.quantity} ${currentItem.unit} (ต้องการเบิก ${quantity})`);
-    }
-
-    const previousQuantity = currentItem.quantity;
-    const newQuantity = previousQuantity - quantity;
-
-    // Update item stock
-    localInventory[itemIndex] = {
-      ...currentItem,
-      quantity: newQuantity,
-      updatedAt: new Date().toISOString(),
-    };
-
-    // Log transaction
-    const txId = `tx-${Date.now()}`;
-    const newTx: InventoryTransaction = {
-      id: txId,
-      propertyId,
-      itemId,
-      itemCode: currentItem.itemCode,
-      itemName: currentItem.name,
-      type,
-      quantity,
-      previousQuantity,
-      newQuantity,
-      unitPrice: currentItem.unitPrice,
-      totalValue: quantity * currentItem.unitPrice,
-      ticketId,
-      reason,
-      requesterUid,
-      requesterName,
-      requesterRoom,
-      performedByUid: user.uid,
-      performedByName: user.displayName,
-      createdAt: new Date().toISOString(),
-    };
-    localTransactions.unshift(newTx);
-
-    // If attached to a work order, update work order materials
-    if (ticketId) {
-      const woIndex = localWorkOrders.findIndex((w) => w.id === ticketId);
-      if (woIndex >= 0) {
-        const materials = [...localWorkOrders[woIndex].materialsUsed];
-        materials.push({
-          itemId,
-          itemCode: currentItem.itemCode,
-          itemName: currentItem.name,
-          quantity,
-          unit: currentItem.unit,
-          unitPrice: currentItem.unitPrice,
-          withdrawnAt: new Date().toISOString(),
-          withdrawnByName: user.displayName,
-        });
-        localWorkOrders[woIndex] = {
-          ...localWorkOrders[woIndex],
-          materialsUsed: materials,
-          updatedAt: new Date().toISOString(),
-        };
-        notifyWorkOrders();
-      }
-    }
-
-    notifyInventory();
-    return;
+  if (!db) {
+    throw new Error('ไม่สามารถเชื่อมต่อฐานข้อมูล Firebase Cloud Firestore ได้');
   }
 
   const firestore = db;
-  // --- REAL FIRESTORE RUNTRANSACTION ---
   const itemDocRef = doc(firestore, 'inventoryItems', itemId);
   const txColRef = collection(firestore, 'inventoryTransactions');
   const txDocRef = doc(txColRef);
@@ -583,7 +598,7 @@ export async function withdrawInventoryItemAtomic(params: {
   await runTransaction(firestore, async (transaction) => {
     const itemSnapshot = await transaction.get(itemDocRef);
     if (!itemSnapshot.exists()) {
-      throw new Error('ไม่พบเอกสารวัสดุชิ้นนี้ใน Firestore');
+      throw new Error('ไม่พบข้อมูลวัสดุชิ้นนี้ใน Cloud Firestore');
     }
 
     const itemData = itemSnapshot.data() as InventoryItem;
@@ -594,13 +609,11 @@ export async function withdrawInventoryItemAtomic(params: {
     const previousQuantity = itemData.quantity;
     const newQuantity = previousQuantity - quantity;
 
-    // 1. Deduct item quantity
     transaction.update(itemDocRef, {
       quantity: newQuantity,
       updatedAt: serverTimestamp(),
     });
 
-    // 2. Create inventory transaction log
     transaction.set(txDocRef, {
       id: txDocRef.id,
       propertyId,
@@ -623,7 +636,6 @@ export async function withdrawInventoryItemAtomic(params: {
       createdAt: serverTimestamp(),
     });
 
-    // 3. Update work order if ticketId exists
     if (ticketId && workOrder) {
       const woDocRef = doc(firestore, 'workOrders', workOrder.id);
       const updatedMaterials = [
@@ -648,9 +660,6 @@ export async function withdrawInventoryItemAtomic(params: {
   });
 }
 
-/**
- * RECEIVE INVENTORY (เพิ่มยอดพัสดุเข้าคลัง)
- */
 export async function receiveInventoryItem(params: {
   propertyId: string;
   itemId: string;
@@ -661,41 +670,8 @@ export async function receiveInventoryItem(params: {
 }): Promise<void> {
   const { propertyId, itemId, quantity, unitPrice, reason, user } = params;
 
-  if (!isFirebaseConfigured() || !db) {
-    const idx = localInventory.findIndex((i) => i.id === itemId);
-    if (idx >= 0) {
-      const current = localInventory[idx];
-      const prev = current.quantity;
-      const next = prev + quantity;
-      localInventory[idx] = {
-        ...current,
-        quantity: next,
-        unitPrice: unitPrice > 0 ? unitPrice : current.unitPrice,
-        updatedAt: new Date().toISOString(),
-      };
-
-      localTransactions.unshift({
-        id: `tx-${Date.now()}`,
-        propertyId,
-        itemId,
-        itemCode: current.itemCode,
-        itemName: current.name,
-        type: 'receive',
-        quantity,
-        previousQuantity: prev,
-        newQuantity: next,
-        unitPrice,
-        totalValue: quantity * unitPrice,
-        ticketId: null,
-        reason,
-        performedByUid: user.uid,
-        performedByName: user.displayName,
-        createdAt: new Date().toISOString(),
-      });
-
-      notifyInventory();
-    }
-    return;
+  if (!db) {
+    throw new Error('ไม่สามารถเชื่อมต่อฐานข้อมูล Firebase Cloud Firestore ได้');
   }
 
   const firestore = db;
@@ -705,7 +681,7 @@ export async function receiveInventoryItem(params: {
 
   await runTransaction(firestore, async (transaction) => {
     const snap = await transaction.get(itemRef);
-    if (!snap.exists()) throw new Error('ไม่พบข้อมูลวัสดุ');
+    if (!snap.exists()) throw new Error('ไม่พบข้อมูลวัสดุใน Cloud Firestore');
     const data = snap.data() as InventoryItem;
     const prev = data.quantity;
     const next = prev + quantity;
@@ -737,9 +713,6 @@ export async function receiveInventoryItem(params: {
   });
 }
 
-/**
- * ADJUST STOCK (ปรับปรุงยอดตรวจนับจริง)
- */
 export async function adjustInventoryItem(params: {
   propertyId: string;
   itemId: string;
@@ -752,41 +725,8 @@ export async function adjustInventoryItem(params: {
   if (newQuantity < 0) {
     throw new Error('จำนวนสต็อกคงเหลือต้องไม่ติดลบ');
   }
-
-  if (!isFirebaseConfigured() || !db) {
-    const idx = localInventory.findIndex((i) => i.id === itemId);
-    if (idx >= 0) {
-      const current = localInventory[idx];
-      const prev = current.quantity;
-      const diff = newQuantity - prev;
-      localInventory[idx] = {
-        ...current,
-        quantity: newQuantity,
-        updatedAt: new Date().toISOString(),
-      };
-
-      localTransactions.unshift({
-        id: `tx-${Date.now()}`,
-        propertyId,
-        itemId,
-        itemCode: current.itemCode,
-        itemName: current.name,
-        type: 'adjustment',
-        quantity: Math.abs(diff),
-        previousQuantity: prev,
-        newQuantity,
-        unitPrice: current.unitPrice,
-        totalValue: Math.abs(diff) * current.unitPrice,
-        ticketId: null,
-        reason: `${reason} (ปรับจาก ${prev} เป็น ${newQuantity})`,
-        performedByUid: user.uid,
-        performedByName: user.displayName,
-        createdAt: new Date().toISOString(),
-      });
-
-      notifyInventory();
-    }
-    return;
+  if (!db) {
+    throw new Error('ไม่สามารถเชื่อมต่อฐานข้อมูล Firebase Cloud Firestore ได้');
   }
 
   const firestore = db;
@@ -796,7 +736,7 @@ export async function adjustInventoryItem(params: {
 
   await runTransaction(firestore, async (transaction) => {
     const snap = await transaction.get(itemRef);
-    if (!snap.exists()) throw new Error('ไม่พบข้อมูลวัสดุ');
+    if (!snap.exists()) throw new Error('ไม่พบข้อมูลวัสดุใน Cloud Firestore');
     const data = snap.data() as InventoryItem;
     const prev = data.quantity;
     const diff = newQuantity - prev;
@@ -827,134 +767,139 @@ export async function adjustInventoryItem(params: {
   });
 }
 
-// ----------------------------------------------------
-// Categories Management
-// ----------------------------------------------------
-const STORAGE_CATEGORIES_KEY = 'dormcare_db_inventory_categories';
-export const DEFAULT_INVENTORY_CATEGORIES = ['งานประปา', 'งานไฟฟ้า'];
+export async function createInventoryItem(params: {
+  item: Omit<InventoryItem, 'id' | 'createdAt' | 'updatedAt'>;
+  user: UserProfile;
+}): Promise<InventoryItem> {
+  const { item, user } = params;
+  if (!db) {
+    throw new Error('ไม่สามารถเชื่อมต่อฐานข้อมูล Firebase Cloud Firestore ได้');
+  }
+
+  const newItemId = `item-${Date.now()}`;
+  const nowIso = new Date().toISOString();
+
+  const newItem: InventoryItem = {
+    ...item,
+    id: newItemId,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  const docRef = doc(db, 'inventoryItems', newItemId);
+  await setDoc(
+    docRef,
+    cleanForFirestore({
+      ...newItem,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  if (newItem.quantity > 0) {
+    const txColRef = collection(db, 'inventoryTransactions');
+    await addDoc(
+      txColRef,
+      cleanForFirestore({
+        propertyId: newItem.propertyId,
+        itemId: newItem.id,
+        itemCode: newItem.itemCode,
+        itemName: newItem.name,
+        type: 'receive',
+        quantity: newItem.quantity,
+        previousQuantity: 0,
+        newQuantity: newItem.quantity,
+        unitPrice: newItem.unitPrice,
+        totalValue: newItem.quantity * newItem.unitPrice,
+        ticketId: null,
+        reason: 'ยอดยกมา / เพิ่มรายการวัสดุใหม่เข้าคลัง',
+        performedByUid: user.uid,
+        performedByName: user.displayName,
+        createdAt: serverTimestamp(),
+      })
+    );
+  }
+
+  return newItem;
+}
+
+export async function deleteInventoryItem(itemId: string): Promise<void> {
+  if (!db) return;
+  const docRef = doc(db, 'inventoryItems', itemId);
+  await deleteDoc(docRef);
+}
+
+export async function fetchTransactions(propertyId: string): Promise<InventoryTransaction[]> {
+  if (!db) return [];
+  try {
+    const colRef = collection(db, 'inventoryTransactions');
+    const q = query(colRef, where('propertyId', '==', propertyId));
+    const snap = await getDocs(q);
+    const list = snap.docs.map((d) => ({ ...d.data(), id: d.id } as InventoryTransaction));
+    list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+    return list;
+  } catch (err) {
+    console.error('Failed to fetch transactions from Firestore:', err);
+    return [];
+  }
+}
+
+// ============================================================================
+// Categories Management (Direct Firebase Cloud Firestore)
+// ============================================================================
 
 export function getStoredCategories(): string[] {
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      const saved = window.localStorage.getItem(STORAGE_CATEGORIES_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
-        }
-      }
-    }
-  } catch (e) {
-    console.warn('Error reading stored categories:', e);
-  }
-  return DEFAULT_INVENTORY_CATEGORIES;
+  return cachedInventoryCategories;
 }
 
 export function saveStoredCategories(categories: string[]): void {
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      window.localStorage.setItem(STORAGE_CATEGORIES_KEY, JSON.stringify(categories));
-    }
-  } catch (e) {
-    console.warn('Error saving stored categories:', e);
-  }
-}
-
-// ----------------------------------------------------
-// Repair Categories Management (หมวดหมู่งานซ่อม: เพิ่ม ลบ แก้ไข)
-// ----------------------------------------------------
-const STORAGE_REPAIR_CATEGORIES_KEY = 'dormcare_db_repair_categories';
-
-export const DEFAULT_REPAIR_CATEGORIES: RepairCategory[] = [
-  { id: 'plumbing', name: 'ระบบประปา / สุขภัณฑ์ / ท่อตัน', isDefault: true },
-  { id: 'electrical', name: 'ระบบไฟฟ้า / หลอดไฟ / สวิตช์', isDefault: true },
-  { id: 'aircon', name: 'เครื่องปรับอากาศ / แอร์', isDefault: true },
-  { id: 'furniture', name: 'เฟอร์นิเจอร์ / ประตู / ลูกบิด / หน้าต่าง', isDefault: true },
-  { id: 'appliance', name: 'เครื่องใช้ไฟฟ้าส่วนกลาง', isDefault: true },
-  { id: 'structural', name: 'โครงสร้าง / ผนัง / ฝ้าเพดาน / หลังคา', isDefault: true },
-  { id: 'sanitary', name: 'ความสะอาด / ขยะ / สิ่งแวดล้อม', isDefault: true },
-  { id: 'other', name: 'อื่นๆ', isDefault: true },
-];
-
-let localRepairCategories: RepairCategory[] = [];
-const repairCategoryListeners: Array<(cats: RepairCategory[]) => void> = [];
-
-export function notifyRepairCategories(cats: RepairCategory[]) {
-  repairCategoryListeners.forEach((fn) => fn([...cats]));
+  cachedInventoryCategories = categories;
+  if (!db) return;
+  const docRef = doc(db, 'systemConfig', 'inventoryCategories');
+  setDoc(docRef, cleanForFirestore({ categories, updatedAt: serverTimestamp() }), { merge: true }).catch(() => {});
 }
 
 export function getStoredRepairCategories(): RepairCategory[] {
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      const saved = window.localStorage.getItem(STORAGE_REPAIR_CATEGORIES_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          localRepairCategories = parsed;
-          return parsed;
-        }
-      }
-    }
-  } catch (e) {
-    console.warn('Error reading stored repair categories:', e);
-  }
-  localRepairCategories = [...DEFAULT_REPAIR_CATEGORIES];
-  saveStoredRepairCategories(localRepairCategories);
-  return localRepairCategories;
+  return cachedRepairCategories;
 }
 
 export function saveStoredRepairCategories(cats: RepairCategory[]): void {
-  localRepairCategories = cats;
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      window.localStorage.setItem(STORAGE_REPAIR_CATEGORIES_KEY, JSON.stringify(cats));
-    }
-  } catch (e) {
-    console.warn('Error saving stored repair categories:', e);
-  }
-  notifyRepairCategories(cats);
+  cachedRepairCategories = cats;
 }
 
 export function subscribeRepairCategories(callback: (cats: RepairCategory[]) => void): () => void {
-  const initial = getStoredRepairCategories();
-  callback(initial);
-  repairCategoryListeners.push(callback);
+  callback(cachedRepairCategories);
 
-  if (isFirebaseConfigured() && db) {
-    try {
-      const colRef = collection(db, 'repairCategories');
-      const unsub = onSnapshot(
-        colRef,
-        (snapshot) => {
-          if (!snapshot.empty) {
-            const remoteCats = snapshot.docs.map((d) => ({ ...d.data(), id: d.id } as RepairCategory));
-            saveStoredRepairCategories(remoteCats);
-          } else if (db) {
-            for (const cat of DEFAULT_REPAIR_CATEGORIES) {
-              setDoc(doc(db, 'repairCategories', cat.id), cleanForFirestore(cat)).catch(() => {});
-            }
+  if (!db) return () => {};
+
+  try {
+    const colRef = collection(db, 'repairCategories');
+    const unsub = onSnapshot(
+      colRef,
+      async (snapshot) => {
+        if (!snapshot.empty) {
+          const remoteCats = snapshot.docs.map((d) => ({ ...d.data(), id: d.id } as RepairCategory));
+          cachedRepairCategories = remoteCats;
+          callback(remoteCats);
+        } else if (db) {
+          // Seed standard categories into Firestore
+          for (const cat of DEFAULT_REPAIR_CATEGORIES) {
+            await setDoc(doc(db, 'repairCategories', cat.id), cleanForFirestore(cat));
           }
-        },
-        (err) => console.warn('Repair categories snapshot error:', err)
-      );
-      return () => {
-        unsub();
-        const idx = repairCategoryListeners.indexOf(callback);
-        if (idx >= 0) repairCategoryListeners.splice(idx, 1);
-      };
-    } catch (e) {
-      console.warn('Failed to listen to repairCategories in Firestore:', e);
-    }
+          cachedRepairCategories = [...DEFAULT_REPAIR_CATEGORIES];
+          callback(DEFAULT_REPAIR_CATEGORIES);
+        }
+      },
+      (err) => console.warn('Repair categories snapshot error:', err)
+    );
+    return unsub;
+  } catch (e) {
+    console.warn('Failed to listen to repairCategories in Firestore:', e);
+    return () => {};
   }
-
-  return () => {
-    const idx = repairCategoryListeners.indexOf(callback);
-    if (idx >= 0) repairCategoryListeners.splice(idx, 1);
-  };
 }
 
 export async function createRepairCategory(name: string): Promise<RepairCategory> {
-  const current = getStoredRepairCategories();
   const cleanName = name.trim();
   const id = `cat-${Date.now()}`;
   const newCat: RepairCategory = {
@@ -964,15 +909,14 @@ export async function createRepairCategory(name: string): Promise<RepairCategory
     createdAt: new Date().toISOString(),
   };
 
-  const updated = [...current, newCat];
-  saveStoredRepairCategories(updated);
+  cachedRepairCategories.push(newCat);
 
-  if (isFirebaseConfigured() && db) {
+  if (db) {
     try {
       const docRef = doc(db, 'repairCategories', id);
       await setDoc(docRef, cleanForFirestore(newCat));
     } catch (err) {
-      console.warn('Firestore createRepairCategory error:', err);
+      console.error('Firestore createRepairCategory error:', err);
     }
   }
 
@@ -980,47 +924,49 @@ export async function createRepairCategory(name: string): Promise<RepairCategory
 }
 
 export async function updateRepairCategory(id: string, newName: string): Promise<void> {
-  const current = getStoredRepairCategories();
-  const updated = current.map((c) => (c.id === id ? { ...c, name: newName.trim() } : c));
-  saveStoredRepairCategories(updated);
+  cachedRepairCategories = cachedRepairCategories.map((c) =>
+    c.id === id ? { ...c, name: newName.trim() } : c
+  );
 
-  if (isFirebaseConfigured() && db) {
+  if (db) {
     try {
       const docRef = doc(db, 'repairCategories', id);
       await updateDoc(docRef, { name: newName.trim(), updatedAt: serverTimestamp() });
     } catch (err) {
-      console.warn('Firestore updateRepairCategory error:', err);
+      console.error('Firestore updateRepairCategory error:', err);
     }
   }
 }
 
 export async function deleteRepairCategory(id: string): Promise<void> {
-  const current = getStoredRepairCategories();
-  const updated = current.filter((c) => c.id !== id);
-  saveStoredRepairCategories(updated);
+  cachedRepairCategories = cachedRepairCategories.filter((c) => c.id !== id);
 
-  if (isFirebaseConfigured() && db) {
+  if (db) {
     try {
       const docRef = doc(db, 'repairCategories', id);
       await deleteDoc(docRef);
     } catch (err) {
-      console.warn('Firestore deleteRepairCategory error:', err);
+      console.error('Firestore deleteRepairCategory error:', err);
     }
   }
 }
 
 export async function resetRepairCategoriesToDefault(): Promise<RepairCategory[]> {
-  saveStoredRepairCategories([...DEFAULT_REPAIR_CATEGORIES]);
+  cachedRepairCategories = [...DEFAULT_REPAIR_CATEGORIES];
+  if (db) {
+    for (const cat of DEFAULT_REPAIR_CATEGORIES) {
+      await setDoc(doc(db, 'repairCategories', cat.id), cleanForFirestore(cat));
+    }
+  }
   return DEFAULT_REPAIR_CATEGORIES;
 }
 
 export function getCategoryDisplayName(categoryKey: string, customCategories?: RepairCategory[]): string {
   if (!categoryKey) return '-';
-  const list = customCategories && customCategories.length > 0 ? customCategories : getStoredRepairCategories();
+  const list = customCategories && customCategories.length > 0 ? customCategories : cachedRepairCategories;
   const found = list.find((c) => c.id === categoryKey || c.name === categoryKey);
   if (found) return found.name;
 
-  // Fallback map for legacy identifiers
   const legacyMap: Record<string, string> = {
     plumbing: 'ระบบประปา / สุขภัณฑ์ / ท่อตัน',
     electrical: 'ระบบไฟฟ้า / หลอดไฟ / สวิตช์',
@@ -1035,242 +981,30 @@ export function getCategoryDisplayName(categoryKey: string, customCategories?: R
   return legacyMap[categoryKey] || categoryKey;
 }
 
-/**
- * CREATE NEW INVENTORY ITEM (เพิ่มรายการวัสดุใหม่)
- */
-export async function createInventoryItem(params: {
-  item: Omit<InventoryItem, 'id' | 'createdAt' | 'updatedAt'>;
-  user: UserProfile;
-}): Promise<InventoryItem> {
-  const { item, user } = params;
-  const newItemId = `item-${Date.now()}`;
-  const nowIso = new Date().toISOString();
-
-  const newItem: InventoryItem = {
-    ...item,
-    id: newItemId,
-    createdAt: nowIso,
-    updatedAt: nowIso,
-  };
-
-  // 1. Optimistic Local update
-  localInventory.unshift(newItem);
-  notifyInventory();
-
-  // If initial quantity > 0, log an initial receive transaction
-  if (newItem.quantity > 0) {
-    const initialTx: InventoryTransaction = {
-      id: `tx-${Date.now()}`,
-      propertyId: newItem.propertyId,
-      itemId: newItem.id,
-      itemCode: newItem.itemCode,
-      itemName: newItem.name,
-      type: 'receive',
-      quantity: newItem.quantity,
-      previousQuantity: 0,
-      newQuantity: newItem.quantity,
-      unitPrice: newItem.unitPrice,
-      totalValue: newItem.quantity * newItem.unitPrice,
-      ticketId: null,
-      reason: 'ยอดยกมา / เพิ่มรายการวัสดุใหม่เข้าคลัง',
-      performedByUid: user.uid,
-      performedByName: user.displayName,
-      createdAt: nowIso,
-    };
-    localTransactions.unshift(initialTx);
-  }
-
-  // 2. Persist to Firestore
-  if (isFirebaseConfigured() && db) {
-    try {
-      const docRef = doc(db, 'inventoryItems', newItemId);
-      const dataToSave = cleanForFirestore({
-        ...newItem,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      withTimeout(setDoc(docRef, dataToSave), 2500, null).catch((err) => {
-        console.warn('Firestore setDoc inventoryItem note:', err);
-      });
-
-      if (newItem.quantity > 0) {
-        const txColRef = collection(db, 'inventoryTransactions');
-        addDoc(txColRef, cleanForFirestore({
-          propertyId: newItem.propertyId,
-          itemId: newItem.id,
-          itemCode: newItem.itemCode,
-          itemName: newItem.name,
-          type: 'receive',
-          quantity: newItem.quantity,
-          previousQuantity: 0,
-          newQuantity: newItem.quantity,
-          unitPrice: newItem.unitPrice,
-          totalValue: newItem.quantity * newItem.unitPrice,
-          ticketId: null,
-          reason: 'ยอดยกมา / เพิ่มรายการวัสดุใหม่เข้าคลัง',
-          performedByUid: user.uid,
-          performedByName: user.displayName,
-          createdAt: serverTimestamp(),
-        })).catch(() => {});
-      }
-    } catch (e) {
-      console.warn('createInventoryItem firestore note:', e);
-    }
-  }
-
-  return newItem;
-}
-
-/**
- * DELETE INVENTORY ITEM (ลบรายการวัสดุ)
- */
-export async function deleteInventoryItem(itemId: string): Promise<void> {
-  localInventory = localInventory.filter((i) => i.id !== itemId);
-  notifyInventory();
-
-  if (!isFirebaseConfigured() || !db) return;
-
-  try {
-    const docRef = doc(db, 'inventoryItems', itemId);
-    withTimeout(deleteDoc(docRef), 2000, null).catch(() => {});
-  } catch (e) {
-    console.warn('deleteInventoryItem note:', e);
-  }
-}
-
-export async function fetchTransactions(propertyId: string): Promise<InventoryTransaction[]> {
-  if (isFirebaseConfigured() && db) {
-    try {
-      const colRef = collection(db, 'inventoryTransactions');
-      // Query without composite index to avoid any index requirement errors
-      const q = query(colRef, where('propertyId', '==', propertyId));
-      const snap = await getDocs(q);
-      const list = snap.docs.map((d) => ({ ...d.data(), id: d.id } as InventoryTransaction));
-      list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-      return list;
-    } catch (err) {
-      console.warn('Failed to fetch real transactions from Firestore, using local fallback:', err);
-    }
-  }
-
-  return localTransactions.filter((t) => t.propertyId === propertyId);
-}
-
-// ----------------------------------------------------
-// Users & Audit Log Service
-// ----------------------------------------------------
-
-export async function fetchUsersList(propertyId?: string): Promise<UserProfile[]> {
-  if (isFirebaseConfigured() && db) {
-    try {
-      const colRef = collection(db, 'users');
-      const snap = await withTimeout(getDocs(colRef), 4000, null);
-      if (snap && !snap.empty) {
-        const remoteUsers = snap.docs.map((d) => ({ ...d.data(), uid: d.id } as UserProfile));
-        if (!remoteUsers.some((u) => u.username?.toLowerCase() === 'admin')) {
-          await saveUserProfile(DEFAULT_PRIMARY_ADMIN);
-          remoteUsers.unshift(DEFAULT_PRIMARY_ADMIN);
-        }
-        saveStoredUsers(remoteUsers);
-        if (!propertyId) return remoteUsers;
-        return remoteUsers.filter((u) => u.propertyIds?.includes(propertyId));
-      } else {
-        // If users collection is empty in Firestore, seed the primary admin to Firestore!
-        await saveUserProfile(DEFAULT_PRIMARY_ADMIN);
-        return [DEFAULT_PRIMARY_ADMIN];
-      }
-    } catch (err) {
-      console.warn('Fetch users from Firestore note, using stored data:', err);
-    }
-  }
-
-  const users = getStoredUsers();
-  if (!propertyId) return users;
-  return users.filter((u) => u.propertyIds?.includes(propertyId));
-}
-
-export async function saveUserProfile(user: UserProfile): Promise<void> {
-  const users = getStoredUsers();
-  const idx = users.findIndex((u) => u.uid === user.uid);
-  if (idx >= 0) {
-    users[idx] = user;
-  } else {
-    users.unshift(user);
-  }
-  saveStoredUsers(users);
-
-  if (!isFirebaseConfigured() || !db) {
-    return;
-  }
-
-  try {
-    const docRef = doc(db, 'users', user.uid);
-    const dataToSave = cleanForFirestore({
-      ...user,
-      updatedAt: serverTimestamp(),
-    });
-    withTimeout(setDoc(docRef, dataToSave, { merge: true }), 2000, null).catch(() => {});
-  } catch (e) {
-    console.warn('Firestore saveUserProfile note:', e);
-  }
-}
-
-export async function updateUserProfile(uid: string, updates: Partial<UserProfile>): Promise<void> {
-  const users = getStoredUsers();
-  const idx = users.findIndex((u) => u.uid === uid);
-  if (idx >= 0) {
-    users[idx] = { ...users[idx], ...updates };
-    saveStoredUsers(users);
-  }
-
-  if (!isFirebaseConfigured() || !db) return;
-
-  try {
-    const docRef = doc(db, 'users', uid);
-    const dataToUpdate = cleanForFirestore({
-      ...updates,
-      updatedAt: serverTimestamp(),
-    });
-    withTimeout(updateDoc(docRef, dataToUpdate), 2000, null).catch(() => {});
-  } catch (e) {
-    console.warn('Firestore updateUserProfile note:', e);
-  }
-}
-
-export async function deleteUserProfile(uid: string): Promise<void> {
-  let users = getStoredUsers();
-  users = users.filter((u) => u.uid !== uid);
-  saveStoredUsers(users);
-
-  if (!isFirebaseConfigured() || !db) return;
-
-  try {
-    const docRef = doc(db, 'users', uid);
-    withTimeout(deleteDoc(docRef), 2000, null).catch(() => {});
-  } catch (e) {
-    console.warn('Firestore deleteUserProfile note:', e);
-  }
-}
+// ============================================================================
+// Audit Log Service (Direct Firebase Cloud Firestore)
+// ============================================================================
 
 export async function createAuditLog(log: Omit<AuditLog, 'id' | 'timestamp'>): Promise<void> {
-  if (!isFirebaseConfigured() || !db) {
-    return;
-  }
+  if (!db) return;
   try {
     const colRef = collection(db, 'auditLogs');
-    await addDoc(colRef, cleanForFirestore({
-      ...log,
-      timestamp: serverTimestamp(),
-    }));
+    await addDoc(
+      colRef,
+      cleanForFirestore({
+        ...log,
+        timestamp: serverTimestamp(),
+      })
+    );
   } catch (e) {
     console.warn('Audit log write error:', e);
   }
 }
 
-// ----------------------------------------------------
-// System Data Uploader & Clean Baseline Service
-// ห้ามให้ข้อมูลตัวอย่าง (Zero Sample / Mock Data)
-// ----------------------------------------------------
+// ============================================================================
+// System Baseline Initializer & Cleaner
+// ============================================================================
+
 export interface UploadSystemDataResult {
   success: boolean;
   uploadedAdmin: boolean;
@@ -1283,93 +1017,89 @@ export interface UploadSystemDataResult {
   syncedAt: string;
 }
 
-/**
- * Uploads real system baseline data into Cloud Firestore:
- * 1. Default Primary Admin user profile (admin / 213894120) into `users` collection.
- * 2. Default Dormitory Property into `properties` collection.
- * 3. 8 Standard System Repair Categories into `repairCategories` collection.
- * 4. Standard Inventory Categories into `systemConfig/inventoryCategories`.
- * 5. System Meta status into `systemConfig/status`.
- * 6. Completely cleans and purges any legacy mock data from Firestore & local caches.
- */
 export async function uploadSystemDataToDatabase(): Promise<UploadSystemDataResult> {
   const syncedAt = new Date().toISOString();
 
-  // 1. Pristine local storage reset
-  saveStoredUsers([DEFAULT_PRIMARY_ADMIN]);
-  saveStoredProperties([DEFAULT_SYSTEM_PROPERTY]);
-  saveStoredRepairCategories([...DEFAULT_REPAIR_CATEGORIES]);
-  saveStoredCategories([...DEFAULT_INVENTORY_CATEGORIES]);
-
-  // Clean in-memory states (Zero sample data)
-  localWorkOrders = [];
-  localInventory = [];
-  localTransactions = [];
-  localProperties = [DEFAULT_SYSTEM_PROPERTY];
-  localUsers = [DEFAULT_PRIMARY_ADMIN];
-  notifyWorkOrders();
-  notifyInventory();
-  notifyRepairCategories(DEFAULT_REPAIR_CATEGORIES);
-
-  if (!isFirebaseConfigured() || !db) {
+  if (!db) {
     return {
-      success: true,
-      uploadedAdmin: true,
-      uploadedProperty: true,
-      uploadedCategoriesCount: DEFAULT_REPAIR_CATEGORIES.length,
-      uploadedInventoryCategoriesCount: DEFAULT_INVENTORY_CATEGORIES.length,
+      success: false,
+      uploadedAdmin: false,
+      uploadedProperty: false,
+      uploadedCategoriesCount: 0,
+      uploadedInventoryCategoriesCount: 0,
       cleanedMockOrdersCount: 0,
       cleanedMockItemsCount: 0,
-      message: 'บันทึกข้อมูลระบบเรียบร้อย (ระบบทำงานในโหมดมาตรฐาน ปราศจากข้อมูลตัวอย่าง)',
+      message: 'ไม่พบการเชื่อมต่อ Firebase Cloud Firestore',
       syncedAt,
     };
   }
 
   try {
-    // 2. Upload Primary Admin account to Firestore
+    // 1. Upload Primary Admin account to Firestore
     const adminRef = doc(db, 'users', DEFAULT_PRIMARY_ADMIN.uid);
-    await setDoc(adminRef, cleanForFirestore({
-      ...DEFAULT_PRIMARY_ADMIN,
-      updatedAt: serverTimestamp(),
-    }), { merge: true });
+    await setDoc(
+      adminRef,
+      cleanForFirestore({
+        ...DEFAULT_PRIMARY_ADMIN,
+        updatedAt: serverTimestamp(),
+      }),
+      { merge: true }
+    );
 
-    // 3. Upload Default System Property to Firestore
+    // 2. Upload Default System Property to Firestore
     const propRef = doc(db, 'properties', DEFAULT_SYSTEM_PROPERTY.id);
-    await setDoc(propRef, cleanForFirestore({
-      ...DEFAULT_SYSTEM_PROPERTY,
-      updatedAt: serverTimestamp(),
-    }), { merge: true });
+    await setDoc(
+      propRef,
+      cleanForFirestore({
+        ...DEFAULT_SYSTEM_PROPERTY,
+        updatedAt: serverTimestamp(),
+      }),
+      { merge: true }
+    );
 
-    // 4. Upload Standard Repair Categories to Firestore
+    // 3. Upload Standard Repair Categories to Firestore
     for (const cat of DEFAULT_REPAIR_CATEGORIES) {
       const catRef = doc(db, 'repairCategories', cat.id);
-      await setDoc(catRef, cleanForFirestore({
-        ...cat,
-        updatedAt: serverTimestamp(),
-      }), { merge: true });
+      await setDoc(
+        catRef,
+        cleanForFirestore({
+          ...cat,
+          updatedAt: serverTimestamp(),
+        }),
+        { merge: true }
+      );
     }
 
-    // 5. Upload Standard Inventory Categories & Metadata to Firestore
+    // 4. Upload Standard Inventory Categories & Metadata to Firestore
     const invCatRef = doc(db, 'systemConfig', 'inventoryCategories');
-    await setDoc(invCatRef, cleanForFirestore({
-      categories: DEFAULT_INVENTORY_CATEGORIES,
-      updatedAt: serverTimestamp(),
-    }), { merge: true });
+    await setDoc(
+      invCatRef,
+      cleanForFirestore({
+        categories: DEFAULT_INVENTORY_CATEGORIES,
+        updatedAt: serverTimestamp(),
+      }),
+      { merge: true }
+    );
 
     const statusRef = doc(db, 'systemConfig', 'status');
-    await setDoc(statusRef, cleanForFirestore({
-      systemName: 'DormCare Dormitory Maintenance & Inventory System',
-      systemVersion: '2.0.0',
-      initializedAt: syncedAt,
-      lastSyncedAt: syncedAt,
-      hasMockData: false,
-      adminUsername: DEFAULT_PRIMARY_ADMIN.username,
-      defaultPropertyCode: DEFAULT_SYSTEM_PROPERTY.code,
-      status: 'active',
-      updatedAt: serverTimestamp(),
-    }), { merge: true });
+    await setDoc(
+      statusRef,
+      cleanForFirestore({
+        systemName: 'DormCare Dormitory Maintenance & Inventory System',
+        systemVersion: '2.5.0',
+        initializedAt: syncedAt,
+        lastSyncedAt: syncedAt,
+        hasMockData: false,
+        adminUsername: DEFAULT_PRIMARY_ADMIN.username,
+        defaultPropertyCode: DEFAULT_SYSTEM_PROPERTY.code,
+        status: 'active',
+        databaseBound: true,
+        updatedAt: serverTimestamp(),
+      }),
+      { merge: true }
+    );
 
-    // 6. Purge legacy mock properties from Firestore
+    // 5. Purge any legacy mock records from Firestore
     const legacyMockPropIds = ['prop-chula-01', 'prop-silom-02'];
     for (const mockId of legacyMockPropIds) {
       try {
@@ -1377,7 +1107,6 @@ export async function uploadSystemDataToDatabase(): Promise<UploadSystemDataResu
       } catch (_) {}
     }
 
-    // 7. Purge legacy mock work orders from Firestore
     const legacyMockWoIds = [
       'wo-doc-001',
       'wo-doc-002',
@@ -1394,7 +1123,6 @@ export async function uploadSystemDataToDatabase(): Promise<UploadSystemDataResu
       } catch (_) {}
     }
 
-    // 8. Purge legacy mock inventory items from Firestore
     const legacyMockItemIds = ['item-001', 'item-002', 'item-003', 'item-004', 'item-005'];
     for (const mockItemId of legacyMockItemIds) {
       try {
@@ -1402,7 +1130,6 @@ export async function uploadSystemDataToDatabase(): Promise<UploadSystemDataResu
       } catch (_) {}
     }
 
-    // 9. Purge legacy mock transactions from Firestore
     const legacyMockTxIds = ['tx-001', 'tx-002', 'tx-003'];
     for (const mockTxId of legacyMockTxIds) {
       try {
@@ -1418,11 +1145,11 @@ export async function uploadSystemDataToDatabase(): Promise<UploadSystemDataResu
       uploadedInventoryCategoriesCount: DEFAULT_INVENTORY_CATEGORIES.length,
       cleanedMockOrdersCount: legacyMockWoIds.length,
       cleanedMockItemsCount: legacyMockItemIds.length,
-      message: 'อัพโหลดข้อมูลระบบลงฐานข้อมูล Firestore สำเร็จ และล้างข้อมูลตัวอย่างทั้งหมดเรียบร้อย',
+      message: 'ผูกข้อมูลจริงกับ Firebase Cloud Firestore เรียบร้อย ปราศจากข้อมูลจำลอง',
       syncedAt,
     };
   } catch (error) {
-    console.error('Error uploading system data to Firestore:', error);
+    console.error('Error uploading baseline data to Firestore:', error);
     return {
       success: false,
       uploadedAdmin: false,
@@ -1431,9 +1158,8 @@ export async function uploadSystemDataToDatabase(): Promise<UploadSystemDataResu
       uploadedInventoryCategoriesCount: 0,
       cleanedMockOrdersCount: 0,
       cleanedMockItemsCount: 0,
-      message: `เกิดข้อผิดพลาดในการอัพโหลด: ${error instanceof Error ? error.message : String(error)}`,
+      message: `เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูล: ${error instanceof Error ? error.message : String(error)}`,
       syncedAt,
     };
   }
 }
-

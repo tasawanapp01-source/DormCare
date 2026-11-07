@@ -102,46 +102,28 @@ export function validateExternalContractor(data: {
 }
 
 export function validateUserCreation(data: {
-  username: string;
-  email?: string;
-  password?: string;
   displayName: string;
+  password?: string;
+  phone?: string;
   role: string;
   propertyIds: string[];
 }): ValidationResult {
   const errors: Record<string, string> = {};
 
-  const cleanUser = data.username ? data.username.trim() : '';
-
-  if (!cleanUser || cleanUser.length < 3) {
-    errors.username = 'ชื่อผู้ใช้ (Username) ต้องมีความยาวอย่างน้อย 3 ตัวอักษร';
-  } else if (/\s/.test(cleanUser)) {
-    errors.username = 'ชื่อผู้ใช้ต้องไม่มีช่องว่าง (เช่น admin, wichai, room301)';
-  } else if (!/^[a-zA-Z0-9_.-]+$/.test(cleanUser)) {
-    errors.username = 'ชื่อผู้ใช้ต้องประกอบด้วยตัวอักษรภาษาอังกฤษ ตัวเลข ขีดล่าง หรือจุดเท่านั้น';
-  }
-
-  if (data.email && data.email.trim()) {
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(data.email.trim())) {
-      errors.email = 'รูปแบบอีเมลไม่ถูกต้อง';
-    }
-  }
-
-  if (data.password === undefined || data.password.length < 6) {
-    errors.password = 'รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษร';
-  }
-
   if (!data.displayName || data.displayName.trim().length < 2) {
-    errors.displayName = 'กรุณาระบุชื่อ-นามสกุลอย่างน้อย 2 ตัวอักษร';
+    errors.displayName = 'กรุณาระบุชื่อ - นามสกุลจริงอย่างน้อย 2 ตัวอักษร';
+  }
+
+  if (data.password === undefined || data.password.trim().length < 4) {
+    errors.password = 'รหัสผ่านเริ่มต้นต้องมีความยาวอย่างน้อย 4 ตัวอักษร';
   }
 
   if (!data.role) {
-    errors.role = 'กรุณาเลือกบทบาทผู้ใช้ (ผู้ดูแลระบบ, ช่างซ่อม, หรือผู้พักอาศัย)';
+    errors.role = 'กรุณาเลือกระดับสิทธิ์ (บทบาท)';
   }
 
-  if (data.role === 'resident' && (!data.propertyIds || data.propertyIds.length === 0)) {
-    errors.propertyIds = 'กรุณาเลือกหอพักอย่างน้อย 1 แห่งที่อนุญาตให้เข้าถึง';
+  if (!data.propertyIds || data.propertyIds.length === 0) {
+    errors.propertyIds = 'กรุณาเลือกหอพักที่อนุญาตให้เข้าถึงอย่างน้อย 1 แห่ง';
   }
 
   return {
@@ -149,3 +131,4 @@ export function validateUserCreation(data: {
     errors,
   };
 }
+

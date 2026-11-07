@@ -8,18 +8,18 @@ import {
   signOut as firebaseSignOut,
   User as FirebaseUser,
 } from 'firebase/auth';
-import { doc, getDoc, collection, getDocs } from 'firebase/firestore';
-import { auth, db, isFirebaseConfigured } from './firebase';
+import { doc, getDoc } from 'firebase/firestore';
+import { auth, db } from './firebase';
 import { UserProfile, Property } from '../types';
 import {
   fetchProperties,
   fetchUsersList,
-  getStoredUsers,
   saveUserProfile,
   DEFAULT_PRIMARY_ADMIN,
   withTimeout,
   uploadSystemDataToDatabase,
   UploadSystemDataResult,
+  testConnection,
 } from './firestoreService';
 
 interface AuthContextType {
@@ -40,7 +40,7 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const SESSION_UID_KEY = 'dormcare_session_uid';
 
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
+  const [currentUser] = useState<FirebaseUser | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [properties, setProperties] = useState<Property[]>([]);
   const [activePropertyId, setActivePropertyId] = useState<string>('');
@@ -50,17 +50,20 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   useEffect(() => {
     let mounted = true;
 
-    // Hard fallback timeout: guarantees loading screen ends in max 600ms under any network conditions
+    // Safety timeout: prevents infinite loading under slow networks
     const hardTimeout = setTimeout(() => {
       if (mounted) {
         setIsLoading(false);
       }
-    }, 600);
+    }, 1500);
 
     async function initSession() {
       try {
-        // Automatically ensure system data is uploaded and synced to Firestore (Zero Mock Data)
-        if (db && isFirebaseConfigured()) {
+        // Validate connection to Firestore
+        await testConnection();
+
+        // Ensure baseline admin and default property exist in Cloud Firestore
+        if (db) {
           uploadSystemDataToDatabase().catch((err) => {
             console.warn('Initial system data upload note:', err);
           });
@@ -74,37 +77,31 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           }
         }
 
-        // Check if there is an active logged-in user in session
+        // Check if there is an active session
         const savedUid = localStorage.getItem(SESSION_UID_KEY);
         if (savedUid && mounted) {
-          // Check local stored users first for instant zero-lag resume
-          const localUsers = getStoredUsers();
-          const cachedUser = localUsers.find((u) => u.uid === savedUid);
-          if (cachedUser && cachedUser.isActive !== false) {
-            setUserProfile(cachedUser);
-            if (cachedUser.propertyIds && cachedUser.propertyIds.length > 0) {
-              setActivePropertyId(cachedUser.propertyIds[0]);
-            }
-          } else {
-            localStorage.removeItem(SESSION_UID_KEY);
-            setUserProfile(null);
-          }
-
-          // In background, verify against Firestore if available without blocking
-          if (db && isFirebaseConfigured()) {
-            withTimeout(getDoc(doc(db, 'users', savedUid)), 1200, null)
-              .then((userSnap) => {
-                if (userSnap && userSnap.exists() && mounted) {
-                  const profile = { ...userSnap.data(), uid: userSnap.id } as UserProfile;
-                  if (profile.isActive !== false) {
-                    setUserProfile(profile);
-                  } else {
-                    localStorage.removeItem(SESSION_UID_KEY);
-                    setUserProfile(null);
-                  }
+          if (db) {
+            const userSnap = await withTimeout(getDoc(doc(db, 'users', savedUid)), 2500, null);
+            if (userSnap && userSnap.exists() && mounted) {
+              const profile = { ...userSnap.data(), uid: userSnap.id } as UserProfile;
+              if (profile.isActive !== false) {
+                setUserProfile(profile);
+                if (profile.propertyIds && profile.propertyIds.length > 0) {
+                  setActivePropertyId(profile.propertyIds[0]);
                 }
-              })
-              .catch(() => {});
+              } else {
+                localStorage.removeItem(SESSION_UID_KEY);
+                setUserProfile(null);
+              }
+            } else {
+              // Check if it's the primary admin
+              if (savedUid === DEFAULT_PRIMARY_ADMIN.uid) {
+                setUserProfile(DEFAULT_PRIMARY_ADMIN);
+              } else {
+                localStorage.removeItem(SESSION_UID_KEY);
+                setUserProfile(null);
+              }
+            }
           }
         }
       } catch (err) {
@@ -125,38 +122,50 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     };
   }, []);
 
-  // Real Database Login: Validate username & password directly from database
+  // Real Database Login: Validate selected user or identifier & password directly from Cloud Firestore
   const login = async (identifier: string, pass: string) => {
     const cleanId = identifier.trim().toLowerCase();
     const cleanPass = pass.trim();
 
     if (!cleanId || !cleanPass) {
-      throw new Error('กรุณากรอกชื่อผู้ใช้และรหัสผ่าน');
+      throw new Error('กรุณาเลือกผู้ใช้งานหรือกรอกชื่อผู้ใช้ และกรอกรหัสผ่าน');
     }
 
-    // 1. Fetch available users directly from database
+    // 1. Fetch available users directly from Cloud Firestore
     const users = await fetchUsersList();
-    
+
     let matched = users.find((u) => {
+      const cleanInput = cleanId.replace(/\s+/g, ' ');
+      const userDisplayName = u.displayName?.toLowerCase().trim().replace(/\s+/g, ' ');
       return (
-        u.username?.toLowerCase() === cleanId ||
-        u.email?.toLowerCase() === cleanId
+        u.uid === identifier ||
+        userDisplayName === cleanInput ||
+        (u.username && u.username.toLowerCase() === cleanId) ||
+        (u.email && u.email.toLowerCase() === cleanId) ||
+        (u.phone && cleanId.length >= 8 && u.phone.replace(/\D/g, '') === cleanId.replace(/\D/g, ''))
       );
     });
 
-    // If primary admin was requested and not yet found, seed primary admin
-    if (!matched && cleanId === 'admin' && cleanPass === '213894120') {
+    // If primary admin was requested and not yet found in Firestore, seed primary admin
+    if (
+      !matched &&
+      (cleanId === 'admin' ||
+        cleanId === 'ผู้ดูแลระบบ' ||
+        cleanId === 'ผู้ดูแลระบบหลัก (admin)' ||
+        identifier === DEFAULT_PRIMARY_ADMIN.uid) &&
+      cleanPass === '213894120'
+    ) {
       matched = DEFAULT_PRIMARY_ADMIN;
       await saveUserProfile(DEFAULT_PRIMARY_ADMIN);
     }
 
     if (!matched) {
-      throw new Error(`ไม่พบชื่อผู้ใช้ "${identifier}" ในฐานข้อมูล`);
+      throw new Error(`ไม่พบบัญชีผู้ใช้ "${identifier}" ในฐานข้อมูล กรุณาตรวจสอบชื่อ-นามสกุล`);
     }
 
-    // 2. Validate password stored in database
+    // 2. Validate password stored in Firestore
     if (matched.password !== cleanPass) {
-      throw new Error('ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง');
+      throw new Error('รหัสผ่านไม่ถูกต้อง กรุณาตรวจสอบรหัสผ่านอีกครั้ง');
     }
 
     // 3. Validate account status
@@ -194,9 +203,9 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const props = await fetchProperties();
       setProperties(props);
       const savedUid = localStorage.getItem(SESSION_UID_KEY);
-      if (savedUid && db && isFirebaseConfigured()) {
+      if (savedUid && db) {
         try {
-          const snap = await withTimeout(getDoc(doc(db, 'users', savedUid)), 1500, null);
+          const snap = await withTimeout(getDoc(doc(db, 'users', savedUid)), 2000, null);
           if (snap && snap.exists()) {
             setUserProfile({ ...snap.data(), uid: snap.id } as UserProfile);
           }

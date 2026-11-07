@@ -7,17 +7,17 @@ export type UserRole = 'admin' | 'staff' | 'resident';
 
 export interface UserProfile {
   uid: string;
-  username: string; // Custom username set by user (e.g. admin, wichai, room301)
-  email: string;
-  displayName: string;
-  role: UserRole;
-  propertyIds: string[]; // List of property IDs user has access to
-  roomId?: string; // Assigned room for resident
-  building?: string; // Assigned building for resident
-  floor?: string; // Assigned floor for resident
-  phone?: string;
-  password?: string;
-  isActive: boolean;
+  displayName: string; // ชื่อ - นามสกุลจริง *
+  role: UserRole; // ระดับสิทธิ์ (บทบาท) *
+  propertyIds: string[]; // หอพักที่อนุญาตให้เข้าถึง *
+  phone?: string; // เบอร์โทรศัพท์ติดต่อ
+  password?: string; // รหัสผ่านเริ่มต้น *
+  isActive: boolean; // สถานะการใช้งาน
+  username?: string; // Optional legacy username
+  email?: string;
+  roomId?: string;
+  building?: string;
+  floor?: string;
   createdAt: string;
   updatedAt?: string;
 }
